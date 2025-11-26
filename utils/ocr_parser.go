@@ -140,24 +140,24 @@ func extractAccountNumber(text string) string {
 func extractEmployeeName(text string) string {
 	lines := strings.Split(text, "\n")
 
-	// 1) First: find line with "Name :"
 	for i, line := range lines {
-		if strings.Contains(strings.ToLower(line), "name") &&
-			strings.Contains(line, ":") {
+		lower := strings.ToLower(line)
 
-			// 2) Check previous line for a proper name
+		if strings.Contains(lower, "name") && strings.Contains(line, ":") {
+
+			// 1) Try previous line first:
 			if i > 0 {
 				candidate := strings.TrimSpace(lines[i-1])
-
-				// Heuristics: must contain at least 2 alphabetic words
-				if isLikelyHumanName(candidate) {
+				candidate = cleanName(candidate)
+				if isCleanName(candidate) {
 					return candidate
 				}
 			}
 
-			// 3) Fallback to regex after Name :
+			// 2) Fallback: extract name after "Name:"
 			name := extractNameAfterLabel(line)
-			if name != "" {
+			name = cleanName(name)
+			if isCleanName(name) {
 				return name
 			}
 		}
@@ -166,11 +166,46 @@ func extractEmployeeName(text string) string {
 	return ""
 }
 
-// helper: detects if a string is a human name
-func isLikelyHumanName(s string) bool {
-	// must contain at least 2 words of letters
+func cleanName(s string) string {
+	if s == "" {
+		return s
+	}
 	parts := strings.Fields(s)
-	if len(parts) < 2 {
+
+	stopWords := map[string]bool{
+		"opening": true,
+		"state":   true,
+		"branch":  true,
+		"bank":    true,
+		"acc":     true,
+		"account": true,
+		"salary":  true,
+		"amount":  true,
+		"credit":  true,
+		"no":      true,
+	}
+
+	clean := []string{}
+	for _, p := range parts {
+		l := strings.ToLower(p)
+		if stopWords[l] {
+			break // stop reading further noise
+		}
+		clean = append(clean, p)
+		if len(clean) == 2 { // cap at 2 words: First + Last
+			break
+		}
+	}
+
+	return strings.Join(clean, " ")
+}
+
+func isCleanName(s string) bool {
+	if s == "" {
+		return false
+	}
+	parts := strings.Fields(s)
+	if len(parts) != 2 {
 		return false
 	}
 	for _, p := range parts {
@@ -181,9 +216,8 @@ func isLikelyHumanName(s string) bool {
 	return true
 }
 
-// fallback regex: only used when name is actually after the label
 func extractNameAfterLabel(line string) string {
-	re := regexp.MustCompile(`(?i)name\s*:\s*([A-Za-z ]+)$`)
+	re := regexp.MustCompile(`(?i)name\s*:\s*([A-Za-z ]+)`)
 	matches := re.FindStringSubmatch(line)
 	if len(matches) > 1 {
 		return strings.TrimSpace(matches[1])
@@ -229,11 +263,6 @@ func extractAccountHolderName(text string) string {
 }
 
 // helpers
-func cleanName(n string) string {
-	n = strings.TrimSpace(n)
-	n = regexp.MustCompile(`\s+`).ReplaceAllString(n, " ")
-	return n
-}
 
 func validName(n string) bool {
 	return len(n) > 2 && len(n) < 50

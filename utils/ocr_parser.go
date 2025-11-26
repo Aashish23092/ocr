@@ -17,7 +17,6 @@ func ParseSalarySlip(ocrText string) dto.SalarySlipData {
 		NetSalary:     extractSalaryAmount(ocrText),
 		AccountNumber: extractAccountNumber(ocrText),
 		EmployeeName:  extractEmployeeName(ocrText),
-		RawText:       ocrText,
 	}
 }
 
@@ -27,7 +26,6 @@ func ParseBankStatement(ocrText string) dto.BankStatementData {
 		AccountNumber:     extractAccountNumber(ocrText),
 		AccountHolderName: extractAccountHolderName(ocrText),
 		Transactions:      extractSalaryCredits(ocrText),
-		RawText:           ocrText,
 	}
 }
 
@@ -85,19 +83,53 @@ func extractSalaryAmount(text string) float64 {
 
 // extractAccountNumber extracts bank account number from text
 func extractAccountNumber(text string) string {
-	// Pattern for account numbers (typically 9-18 digits)
-	patterns := []string{
-		`(?i)bank\s*a/?c(?:\s*no\.?|\s*number)[\s:]*([0-9]{9,18})`,
-		`(?i)a/?c(?:\s*no\.?|\s*number)[\s:]*([0-9]{9,18})`,
-		`(?i)account\s*(?:no\.?|number)[\s:]*([0-9]{9,18})`,
-		`(?i)acc(?:\s*no\.?|\s*number)[\s:]*([0-9]{9,18})`,
-		`\b([0-9]{9,18})\b`,
+	cleaned := strings.ReplaceAll(text, "—", "-")
+	cleaned = strings.ReplaceAll(cleaned, ":", " ")
+	cleaned = strings.ReplaceAll(cleaned, "|", " ")
+	cleaned = strings.ToLower(cleaned)
+
+	// 1️⃣ PRIORITY: Explicit account number labels (HIGHEST accuracy)
+	explicitPatterns := []string{
+		`account\s*no[\s\-]*([0-9]{9,18})`,
+		`accountnumber[\s\-]*([0-9]{9,18})`,
+		`a/c\s*no[\s\-]*([0-9]{9,18})`,
+		`ac\s*no[\s\-]*([0-9]{9,18})`,
+		`acc\s*no[\s\-]*([0-9]{9,18})`,
 	}
 
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+	for _, p := range explicitPatterns {
+		re := regexp.MustCompile(p)
+		if matches := re.FindStringSubmatch(cleaned); len(matches) > 1 {
 			return matches[1]
+		}
+	}
+
+	// 2️⃣ Masked formats like XXXXXXXX6323
+	masked := regexp.MustCompile(`x{4,}[0-9]{3,6}`)
+	if m := masked.FindString(cleaned); m != "" {
+		// Extract last digits only
+		digits := regexp.MustCompile(`[0-9]+`).FindString(m)
+		if len(digits) >= 4 {
+			return digits
+		}
+	}
+
+	// 3️⃣ Fallback: 9–18 digit numbers, but EXCLUDE cust id, cif, etc
+	fallback := regexp.MustCompile(`([0-9]{9,18})`)
+	candidates := fallback.FindAllString(cleaned, -1)
+
+	for _, c := range candidates {
+		// Reject typical non-account number fields
+		if strings.Contains(cleaned, "cust id "+c) ||
+			strings.Contains(cleaned, "customer id "+c) ||
+			strings.Contains(cleaned, "cif "+c) ||
+			strings.Contains(cleaned, "custid "+c) {
+			continue
+		}
+
+		// Bank accounts are usually ≥ 10 digits, but not 8 digits
+		if len(c) >= 10 {
+			return c
 		}
 	}
 
@@ -106,34 +138,105 @@ func extractAccountNumber(text string) string {
 
 // extractEmployeeName extracts employee name from salary slip
 func extractEmployeeName(text string) string {
-	nameRegex := regexp.MustCompile(`(?i)name\s*:\s*([A-Za-z ]+?)(?:\s+(?:bank|acc|account)\b|$)`)
-	match := nameRegex.FindStringSubmatch(text)
-	if len(match) > 1 {
-		return strings.TrimSpace(match[1])
-	}
-	return ""
-}
+	lines := strings.Split(text, "\n")
 
-// extractAccountHolderName extracts account holder name from bank statement
-func extractAccountHolderName(text string) string {
-	patterns := []string{
-		`(?i)account\s*holder[\s:]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)customer\s*name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
-	}
+	// 1) First: find line with "Name :"
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(line), "name") &&
+			strings.Contains(line, ":") {
 
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
-			name := strings.TrimSpace(matches[1])
-			name = regexp.MustCompile(`\s+`).ReplaceAllString(name, " ")
-			if len(name) > 2 && len(name) < 50 {
+			// 2) Check previous line for a proper name
+			if i > 0 {
+				candidate := strings.TrimSpace(lines[i-1])
+
+				// Heuristics: must contain at least 2 alphabetic words
+				if isLikelyHumanName(candidate) {
+					return candidate
+				}
+			}
+
+			// 3) Fallback to regex after Name :
+			name := extractNameAfterLabel(line)
+			if name != "" {
 				return name
 			}
 		}
 	}
 
 	return ""
+}
+
+// helper: detects if a string is a human name
+func isLikelyHumanName(s string) bool {
+	// must contain at least 2 words of letters
+	parts := strings.Fields(s)
+	if len(parts) < 2 {
+		return false
+	}
+	for _, p := range parts {
+		if !regexp.MustCompile(`^[A-Za-z]+$`).MatchString(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// fallback regex: only used when name is actually after the label
+func extractNameAfterLabel(line string) string {
+	re := regexp.MustCompile(`(?i)name\s*:\s*([A-Za-z ]+)$`)
+	matches := re.FindStringSubmatch(line)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
+
+// extractAccountHolderName extracts account holder name from bank statement
+func extractAccountHolderName(text string) string {
+	// 1. Try label-based patterns first (your original logic)
+	patterns := []string{
+		`(?i)account\s*holder[\s:]*([A-Z][a-zA-Z\s\.]+)`,
+		`(?i)customer\s*name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
+		`(?i)name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+			name := cleanName(matches[1])
+			if validName(name) {
+				return name
+			}
+		}
+	}
+
+	// 2. Fallback: Detect standalone prefix-based names (HDFC, SBI, ICICI)
+	prefixRegex := regexp.MustCompile(`(?m)(?i)\b(MR|MRS|MS|SHRI|SMT)\.?\s+[A-Z][A-Z\s]{2,50}`)
+	match := prefixRegex.FindString(text)
+	if match != "" {
+		// remove prefix and clean
+		parts := strings.Fields(match)
+		if len(parts) >= 2 {
+			name := strings.Join(parts[1:], " ")
+			name = cleanName(name)
+			if validName(name) {
+				return name
+			}
+		}
+	}
+
+	return ""
+}
+
+// helpers
+func cleanName(n string) string {
+	n = strings.TrimSpace(n)
+	n = regexp.MustCompile(`\s+`).ReplaceAllString(n, " ")
+	return n
+}
+
+func validName(n string) bool {
+	return len(n) > 2 && len(n) < 50
 }
 
 // extractSalaryCredits extracts salary credit transactions from bank statement

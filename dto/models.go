@@ -37,7 +37,6 @@ type SalarySlipData struct {
 	NetSalary     float64         `json:"net_salary"`
 	AccountNumber string          `json:"account_number,omitempty"`
 	IFSC          string          `json:"ifsc,omitempty"`
-	RawText       string          `json:"raw_text"`
 	Quality       DocumentQuality `json:"quality"`
 }
 
@@ -58,7 +57,6 @@ type BankStatementData struct {
 	PeriodFrom        *time.Time        `json:"period_from,omitempty"`
 	PeriodTo          *time.Time        `json:"period_to,omitempty"`
 	Transactions      []BankTransaction `json:"transactions"`
-	RawText           string            `json:"raw_text"`
 	Quality           DocumentQuality   `json:"quality"`
 }
 

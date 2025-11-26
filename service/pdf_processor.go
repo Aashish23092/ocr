@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	
+
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,7 +86,7 @@ func (p *pdfProcessor) ExtractText(pdfData []byte, password string) (string, err
 			fmt.Printf("Error getting text from page %d: %v\n", pageIndex, err)
 			continue
 		}
-		
+
 		for _, row := range rows {
 			for _, word := range row.Content {
 				textBuilder.WriteString(word.S)
@@ -138,7 +138,7 @@ func (p *pdfProcessor) ExtractImages(pdfData []byte, password string) ([]image.I
 		if !strings.HasSuffix(file.Name(), ".png") {
 			continue
 		}
-		
+
 		imgPath := filepath.Join(tempDir, file.Name())
 		imgFile, err := os.Open(imgPath)
 		if err != nil {

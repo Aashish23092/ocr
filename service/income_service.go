@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log"
 	"mime/multipart"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +62,7 @@ func (s *IncomeService) VerifyIncome(req *dto.IncomeVerificationRequest) (*dto.I
 		wg.Add(1)
 		go func(meta dto.DocumentMeta, file *multipart.FileHeader) {
 			defer wg.Done()
-			
+
 			// Open file to read bytes (needed for PDF processing)
 			f, err := file.Open()
 			if err != nil {
@@ -132,23 +135,59 @@ func (s *IncomeService) ProcessDocument(ctx context.Context, fileHeader *multipa
 		text, err = s.pdfProcessor.ExtractText(data, meta.Password)
 		if err != nil {
 			log.Printf("PDF text extraction failed for %s: %v", meta.Filename, err)
+			quality.Issues = append(quality.Issues, "pdf_text_extraction_failed")
 		}
 
 		// If text is empty or too short, try image extraction (scanned PDF)
-		if len(strings.TrimSpace(text)) < 100 {
-			log.Printf("PDF %s seems to be scanned, attempting image extraction", meta.Filename)
+		if len(strings.TrimSpace(text)) < 20 {
+			log.Printf("PDF %s seems to be scanned or has minimal text, attempting image-based OCR", meta.Filename)
+
 			images, imgErr := s.pdfProcessor.ExtractImages(data, meta.Password)
-			if imgErr == nil && len(images) > 0 {
-				// OCR on images
-				// For now, we just note it. To do proper OCR on images, we'd need to save them to temp files 
-				// and call TesseractClient.extractTextAndQuality(tempFile).
-				// Since we don't have that exposed easily for image.Image, we skip for now.
-				quality.Issues = append(quality.Issues, "scanned_pdf_ocr_skipped")
+			if imgErr != nil || len(images) == 0 {
+				log.Printf("Failed to extract images from PDF %s: %v", meta.Filename, imgErr)
+				quality.Issues = append(quality.Issues, "pdf_image_extraction_failed")
 			} else {
-				quality.Issues = append(quality.Issues, "pdf_extraction_failed")
+				// OCR each image and aggregate results
+				var combinedText strings.Builder
+				var totalConfidence float64
+				var imageCount int
+
+				for _, img := range images {
+					tempImgFile, err := saveImageToTempFile(img)
+					if err != nil {
+						log.Printf("Failed to save temporary image for OCR: %v", err)
+						continue
+					}
+
+					pageText, pageConf, ocrErr := s.tesseractClient.ExtractTextAndQuality(tempImgFile)
+					if ocrErr != nil {
+						log.Printf("OCR failed for a page in %s: %v", meta.Filename, ocrErr)
+						os.Remove(tempImgFile) // Clean up on error
+						continue
+					}
+
+					combinedText.WriteString(pageText)
+					combinedText.WriteString("\n") // Page break
+					totalConfidence += pageConf
+					imageCount++
+
+					os.Remove(tempImgFile) // Clean up immediately
+				}
+
+				if imageCount > 0 {
+					text = combinedText.String()
+					quality.OcrConfidence = totalConfidence / float64(imageCount)
+					quality.ResolutionScore = 80.0 // Placeholder
+					quality.FinalScore = (quality.OcrConfidence + quality.ResolutionScore) / 2
+					if quality.FinalScore < 60 {
+						quality.Issues = append(quality.Issues, "low_quality_document")
+					}
+				} else {
+					quality.Issues = append(quality.Issues, "scanned_pdf_ocr_failed")
+				}
 			}
 		} else {
-			// Text PDF
+			// Text-based PDF
 			quality.OcrConfidence = 100.0
 			quality.ResolutionScore = 100.0 // Vector PDF
 			quality.FinalScore = 100.0
@@ -160,11 +199,11 @@ func (s *IncomeService) ProcessDocument(ctx context.Context, fileHeader *multipa
 		if err != nil {
 			return nil, fmt.Errorf("image OCR failed: %w", err)
 		}
-		
+
 		quality.OcrConfidence = conf
 		quality.ResolutionScore = 80.0 // Placeholder, need image dimensions
 		quality.FinalScore = (quality.OcrConfidence + quality.ResolutionScore) / 2
-		
+
 		if quality.FinalScore < 60 {
 			quality.Issues = append(quality.Issues, "low_quality_document")
 		}
@@ -214,7 +253,7 @@ func (s *IncomeService) CrossCheck(slips []dto.SalarySlipData, stmts []dto.BankS
 			}
 		}
 	}
-	
+
 	// Salary Credit Match (Simplified)
 	// Check if any credit matches net salary within a margin
 	for _, slip := range slips {
@@ -233,4 +272,19 @@ func (s *IncomeService) CrossCheck(slips []dto.SalarySlipData, stmts []dto.BankS
 	}
 
 	return result
+}
+
+// saveImageToTempFile saves an image.Image to a temporary PNG file.
+func saveImageToTempFile(img image.Image) (string, error) {
+	tempFile, err := os.CreateTemp("", "ocr-img-*.png")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp image file: %w", err)
+	}
+	defer tempFile.Close()
+
+	if err := png.Encode(tempFile, img); err != nil {
+		return "", fmt.Errorf("failed to encode image to PNG: %w", err)
+	}
+
+	return tempFile.Name(), nil
 }

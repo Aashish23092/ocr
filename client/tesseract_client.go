@@ -31,7 +31,7 @@ func (tc *TesseractClient) ExtractTextFromFile(fileHeader *multipart.FileHeader)
 	defer file.Close()
 
 	// Create temporary file
-	tempFile, err := tc.createTempFile(file, fileHeader.Filename)
+	tempFile, err := tc.CreateTempFile(file, fileHeader.Filename)
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -46,8 +46,8 @@ func (tc *TesseractClient) ExtractTextFromFile(fileHeader *multipart.FileHeader)
 	return text, nil
 }
 
-// createTempFile creates a temporary file from uploaded content
-func (tc *TesseractClient) createTempFile(file multipart.File, filename string) (string, error) {
+// CreateTempFile creates a temporary file from uploaded content
+func (tc *TesseractClient) CreateTempFile(file multipart.File, filename string) (string, error) {
 	ext := filepath.Ext(filename)
 	tempFile, err := os.CreateTemp("", "ocr-*"+ext)
 	if err != nil {
@@ -97,16 +97,16 @@ func (tc *TesseractClient) ExtractTextAndQualityFromFile(fileHeader *multipart.F
 	}
 	defer file.Close()
 
-	tempFile, err := tc.createTempFile(file, fileHeader.Filename)
+	tempFile, err := tc.CreateTempFile(file, fileHeader.Filename)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tempFile)
 
-	return tc.extractTextAndQuality(tempFile)
+	return tc.ExtractTextAndQuality(tempFile)
 }
 
-func (tc *TesseractClient) extractTextAndQuality(filePath string) (string, float64, error) {
+func (tc *TesseractClient) ExtractTextAndQuality(filePath string) (string, float64, error) {
 	client := gosseract.NewClient()
 	defer client.Close()
 

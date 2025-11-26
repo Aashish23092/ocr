@@ -64,11 +64,10 @@ func extractMonth(text string) string {
 func extractSalaryAmount(text string) float64 {
 	// Patterns for salary amounts
 	patterns := []string{
-		`(?i)net\s*(?:pay|salary|amount)[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)total\s*(?:pay|salary|amount)[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)(?:Rs\.?|INR|₹)\s*([0-9,]+\.?\d*)`,
-		`(?i)salary[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)gross\s*(?:pay|salary)[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)net\s*(?:pay|salary|amount|payment)[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)total\s*(?:pay|salary|amount)[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)salary[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)gross\s*(?:pay|salary)[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
 	}
 
 	for _, pattern := range patterns {
@@ -88,9 +87,10 @@ func extractSalaryAmount(text string) float64 {
 func extractAccountNumber(text string) string {
 	// Pattern for account numbers (typically 9-18 digits)
 	patterns := []string{
-		`(?i)a/?c(?:\s*no\.?|\s*number)[:\s]*([0-9]{9,18})`,
-		`(?i)account\s*(?:no\.?|number)[:\s]*([0-9]{9,18})`,
-		`(?i)acc(?:\s*no\.?|\s*number)[:\s]*([0-9]{9,18})`,
+		`(?i)bank\s*a/?c(?:\s*no\.?|\s*number)[\s:]*([0-9]{9,18})`,
+		`(?i)a/?c(?:\s*no\.?|\s*number)[\s:]*([0-9]{9,18})`,
+		`(?i)account\s*(?:no\.?|number)[\s:]*([0-9]{9,18})`,
+		`(?i)acc(?:\s*no\.?|\s*number)[\s:]*([0-9]{9,18})`,
 		`\b([0-9]{9,18})\b`,
 	}
 
@@ -106,33 +106,20 @@ func extractAccountNumber(text string) string {
 
 // extractEmployeeName extracts employee name from salary slip
 func extractEmployeeName(text string) string {
-	patterns := []string{
-		`(?i)employee\s*name[:\s]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)name[:\s]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)emp\.\s*name[:\s]*([A-Z][a-zA-Z\s\.]+)`,
+	nameRegex := regexp.MustCompile(`(?i)name\s*:\s*([A-Za-z ]+?)(?:\s+(?:bank|acc|account)\b|$)`)
+	match := nameRegex.FindStringSubmatch(text)
+	if len(match) > 1 {
+		return strings.TrimSpace(match[1])
 	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
-			name := strings.TrimSpace(matches[1])
-			// Clean up the name (remove extra spaces, limit length)
-			name = regexp.MustCompile(`\s+`).ReplaceAllString(name, " ")
-			if len(name) > 2 && len(name) < 50 {
-				return name
-			}
-		}
-	}
-
 	return ""
 }
 
 // extractAccountHolderName extracts account holder name from bank statement
 func extractAccountHolderName(text string) string {
 	patterns := []string{
-		`(?i)account\s*holder[:\s]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)name[:\s]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)customer\s*name[:\s]*([A-Z][a-zA-Z\s\.]+)`,
+		`(?i)account\s*holder[\s:]*([A-Z][a-zA-Z\s\.]+)`,
+		`(?i)name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
+		`(?i)customer\s*name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
 	}
 
 	for _, pattern := range patterns {
@@ -253,4 +240,85 @@ func CompareNames(name1, name2 string) bool {
 
 	// If at least 50% of words match
 	return float64(matchCount)/float64(len(words1)) >= 0.5
+}
+
+// CalculateNameSimilarity calculates the similarity between two names using Levenshtein distance
+// Returns a score between 0.0 and 1.0
+func CalculateNameSimilarity(name1, name2 string) float64 {
+	s1 := NormalizeString(name1)
+	s2 := NormalizeString(name2)
+
+	if s1 == "" && s2 == "" {
+		return 1.0
+	}
+	if s1 == "" || s2 == "" {
+		return 0.0
+	}
+
+	dist := levenshteinDistance(s1, s2)
+	maxLen := len(s1)
+	if len(s2) > maxLen {
+		maxLen = len(s2)
+	}
+
+	if maxLen == 0 {
+		return 1.0
+	}
+
+	return 1.0 - float64(dist)/float64(maxLen)
+}
+
+// levenshteinDistance calculates the Levenshtein distance between two strings
+func levenshteinDistance(s1, s2 string) int {
+	r1 := []rune(s1)
+	r2 := []rune(s2)
+	n, m := len(r1), len(r2)
+
+	if n == 0 {
+		return m
+	}
+	if m == 0 {
+		return n
+	}
+
+	matrix := make([][]int, n+1)
+	for i := range matrix {
+		matrix[i] = make([]int, m+1)
+	}
+
+	for i := 0; i <= n; i++ {
+		matrix[i][0] = i
+	}
+	for j := 0; j <= m; j++ {
+		matrix[0][j] = j
+	}
+
+	for i := 1; i <= n; i++ {
+		for j := 1; j <= m; j++ {
+			cost := 0
+			if r1[i-1] != r2[j-1] {
+				cost = 1
+			}
+			matrix[i][j] = min(
+				matrix[i-1][j]+1,      // deletion
+				matrix[i][j-1]+1,      // insertion
+				matrix[i-1][j-1]+cost, // substitution
+			)
+		}
+	}
+
+	return matrix[n][m]
+}
+
+func min(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
 }

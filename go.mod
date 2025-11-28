@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
+	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/otiai10/gosseract/v2 v2.4.1
 	github.com/pdfcpu/pdfcpu v0.11.1
 	github.com/stretchr/testify v1.11.1
@@ -50,6 +51,7 @@ require (
 	golang.org/x/sys v0.37.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	golang.org/x/tools v0.37.0 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/protobuf v1.36.9 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

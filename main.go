@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os" // <-- IMPORTANT
+
 	"github.com/Aashish23092/ocr-income-verification/client"
 	"github.com/Aashish23092/ocr-income-verification/config"
 	"github.com/Aashish23092/ocr-income-verification/handler"
@@ -52,6 +53,11 @@ func main() {
 		income := api.Group("/income")
 		{
 			income.POST("/verify", incomeHandler.VerifyIncome)
+		}
+
+		itr := api.Group("/itr")
+		{
+			itr.POST("/analyze", incomeHandler.AnalyzeITR)
 		}
 	}
 

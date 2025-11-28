@@ -454,3 +454,151 @@ func min(a, b, c int) int {
 	}
 	return c
 }
+
+// ParseITR extracts structured data from ITR (Income Tax Return) OCR text
+func ParseITR(ocrText string) dto.ITRResult {
+	return dto.ITRResult{
+		PAN:            extractPAN(ocrText),
+		Name:           extractITRName(ocrText),
+		AssessmentYear: extractAssessmentYear(ocrText),
+		TotalIncome:    extractTotalIncome(ocrText),
+		TaxableIncome:  extractTaxableIncome(ocrText),
+		TaxPaid:        extractTaxPaid(ocrText),
+		RefundAmount:   extractRefundAmount(ocrText),
+		FilingDate:     extractFilingDate(ocrText),
+		RawText:        ocrText,
+	}
+}
+
+// extractPAN extracts PAN number from ITR text
+// PAN format: ABCDE1234F (5 letters, 4 digits, 1 letter)
+func extractPAN(text string) string {
+	panPattern := regexp.MustCompile(`\b([A-Z]{5}[0-9]{4}[A-Z])\b`)
+	if matches := panPattern.FindStringSubmatch(text); len(matches) > 1 {
+		return matches[1]
+	}
+	return ""
+}
+
+// extractITRName extracts taxpayer name from ITR text
+func extractITRName(text string) string {
+	patterns := []string{
+		`(?i)name\s*of\s*(?:the\s*)?(?:assessee|taxpayer)[:\s]*([A-Z][a-zA-Z\s\.]{2,50})`,
+		`(?i)assessee\s*name[:\s]*([A-Z][a-zA-Z\s\.]{2,50})`,
+		`(?i)taxpayer\s*name[:\s]*([A-Z][a-zA-Z\s\.]{2,50})`,
+		`(?i)name[:\s]*([A-Z][a-zA-Z\s\.]{2,50})`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+			name := strings.TrimSpace(matches[1])
+			// Clean up name - remove trailing non-letter characters
+			name = regexp.MustCompile(`[^a-zA-Z\s]+$`).ReplaceAllString(name, "")
+			name = strings.TrimSpace(name)
+			if len(name) > 2 && len(name) < 50 {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// extractAssessmentYear extracts assessment year from ITR text
+// Format: 2023-24, 2023-2024, AY 2023-24, etc.
+func extractAssessmentYear(text string) string {
+	patterns := []string{
+		`(?i)assessment\s*year[:\s]*(\d{4}[-]\d{2,4})`,
+		`(?i)A\.?Y\.?[:\s]*(\d{4}[-]\d{2,4})`,
+		`\b(\d{4}[-]\d{2})\b`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+			return matches[1]
+		}
+	}
+	return ""
+}
+
+// extractTotalIncome extracts total income from ITR text
+func extractTotalIncome(text string) float64 {
+	patterns := []string{
+		`(?i)total\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)gross\s*total\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)income\s*under\s*all\s*heads[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+	}
+
+	return extractAmount(text, patterns)
+}
+
+// extractTaxableIncome extracts taxable income from ITR text
+func extractTaxableIncome(text string) float64 {
+	patterns := []string{
+		`(?i)taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)total\s*taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)net\s*taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+	}
+
+	return extractAmount(text, patterns)
+}
+
+// extractTaxPaid extracts tax paid from ITR text
+func extractTaxPaid(text string) float64 {
+	patterns := []string{
+		`(?i)tax\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)total\s*tax\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)taxes\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)tax\s*liability[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+	}
+
+	return extractAmount(text, patterns)
+}
+
+// extractRefundAmount extracts refund amount from ITR text
+func extractRefundAmount(text string) float64 {
+	patterns := []string{
+		`(?i)refund[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)refund\s*amount[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)amount\s*refundable[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+	}
+
+	return extractAmount(text, patterns)
+}
+
+// extractFilingDate extracts filing date from ITR text
+func extractFilingDate(text string) string {
+	patterns := []string{
+		`(?i)filing\s*date[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})`,
+		`(?i)date\s*of\s*filing[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})`,
+		`(?i)filed\s*on[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+			dateStr := matches[1]
+			// Try to parse and format the date
+			if parsedDate, err := parseDate(dateStr); err == nil {
+				return parsedDate.Format("2006-01-02")
+			}
+			return dateStr
+		}
+	}
+	return ""
+}
+
+// extractAmount is a helper function to extract monetary amounts
+func extractAmount(text string, patterns []string) float64 {
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+			amountStr := strings.ReplaceAll(matches[1], ",", "")
+			if amount, err := strconv.ParseFloat(amountStr, 64); err == nil {
+				return amount
+			}
+		}
+	}
+	return 0.0
+}

@@ -67,3 +67,16 @@ type CrossCheckResult struct {
 	MissingSalaryCredits []string `json:"missing_salary_credits"`
 	Notes                []string `json:"notes"`
 }
+
+// ITRResult represents parsed Income Tax Return data
+type ITRResult struct {
+	PAN            string  `json:"pan"`
+	Name           string  `json:"name"`
+	AssessmentYear string  `json:"assessment_year"`
+	TotalIncome    float64 `json:"total_income"`
+	TaxableIncome  float64 `json:"taxable_income"`
+	TaxPaid        float64 `json:"tax_paid"`
+	RefundAmount   float64 `json:"refund_amount"`
+	FilingDate     string  `json:"filing_date"`
+	RawText        string  `json:"raw_text"`
+}

@@ -3,6 +3,7 @@ package handler
 import (
 	"log"
 	"net/http"
+
 	"github.com/Aashish23092/ocr-income-verification/dto"
 	"github.com/Aashish23092/ocr-income-verification/service"
 
@@ -68,6 +69,31 @@ func (h *IncomeHandler) VerifyIncome(c *gin.Context) {
 	// Send success response
 	log.Println("Income verification completed successfully")
 	c.JSON(http.StatusOK, response)
+}
+
+// AnalyzeITR handles the POST /itr/analyze endpoint
+func (h *IncomeHandler) AnalyzeITR(c *gin.Context) {
+	log.Println("Received ITR analysis request")
+
+	// Parse file upload
+	file, err := c.FormFile("file")
+	if err != nil {
+		h.sendError(c, http.StatusBadRequest, "No file provided", err)
+		return
+	}
+
+	log.Printf("Processing ITR file: %s (size: %d bytes)", file.Filename, file.Size)
+
+	// Call service layer
+	result, err := h.incomeService.AnalyzeITR(file)
+	if err != nil {
+		h.sendError(c, http.StatusInternalServerError, "Failed to analyze ITR", err)
+		return
+	}
+
+	// Send success response
+	log.Println("ITR analysis completed successfully")
+	c.JSON(http.StatusOK, result)
 }
 
 // sendError sends a structured error response

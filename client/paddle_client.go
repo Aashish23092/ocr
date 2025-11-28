@@ -2,10 +2,14 @@ package client
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -72,6 +76,70 @@ func (p *PaddleClient) ExtractText(img image.Image) (string, error) {
 		len(mergedText), len(enText), len(hiText))
 
 	return mergedText, nil
+}
+
+// ExtractTextFromPDFBytes extracts text from PDF bytes using PaddleOCR HTTP API
+// This is used for ITR analysis when PDF text extraction quality is low
+func (p *PaddleClient) ExtractTextFromPDFBytes(pdfBytes []byte) (string, error) {
+	// PaddleOCR REST API endpoint
+	apiURL := os.Getenv("PADDLEOCR_API_URL")
+	if apiURL == "" {
+		apiURL = "http://paddleocr:8866/predict/ocr_system"
+	}
+
+	// Encode PDF bytes to base64
+	encodedPDF := base64.StdEncoding.EncodeToString(pdfBytes)
+
+	// Prepare request payload
+	payload := map[string]interface{}{
+		"images": []string{encodedPDF},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request payload: %w", err)
+	}
+
+	// Make HTTP POST request
+	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to call PaddleOCR API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("PaddleOCR API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var result struct {
+		Results [][]struct {
+			Text       string  `json:"text"`
+			Confidence float64 `json:"confidence"`
+		} `json:"results"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode PaddleOCR response: %w", err)
+	}
+
+	// Extract text from results
+	var textBuilder strings.Builder
+	if len(result.Results) > 0 {
+		for _, line := range result.Results[0] {
+			textBuilder.WriteString(line.Text)
+			textBuilder.WriteString("\n")
+		}
+	}
+
+	extractedText := textBuilder.String()
+	if extractedText == "" {
+		return "", fmt.Errorf("PaddleOCR extracted no text from PDF")
+	}
+
+	log.Printf("PaddleOCR HTTP API extracted %d characters", len(extractedText))
+	return extractedText, nil
 }
 
 // runPaddleOCR executes PaddleOCR Python CLI for a specific language

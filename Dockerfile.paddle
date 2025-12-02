@@ -1,0 +1,11 @@
+FROM paddlecloud/paddleocr:2.6-cpu-latest
+
+# Install PaddleOCR + Flask + OpenCV
+RUN pip install paddleocr==2.6.0.1 flask opencv-python-headless
+
+COPY paddle_server.py /app/paddle_server.py
+
+WORKDIR /app
+EXPOSE 8866
+
+CMD ["python3", "paddle_server.py"]

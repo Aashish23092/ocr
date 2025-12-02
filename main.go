@@ -2,7 +2,7 @@ package main
 
 import (
 	"log"
-	"os" // <-- IMPORTANT
+	"os"
 
 	"github.com/Aashish23092/ocr-income-verification/client"
 	"github.com/Aashish23092/ocr-income-verification/config"
@@ -13,11 +13,11 @@ import (
 )
 
 func main() {
-	// VERY IMPORTANT: Set correct tessdata prefix for Tesseract v5
+	// Tesseract configuration
 	os.Setenv("TESSDATA_PREFIX", "/usr/share/tesseract-ocr/5/tessdata/")
 	log.Println("TESSDATA_PREFIX set to:", os.Getenv("TESSDATA_PREFIX"))
 
-	// Initialize configuration
+	// Load application config
 	cfg := config.LoadConfig()
 
 	// Initialize Tesseract client
@@ -27,19 +27,33 @@ func main() {
 	// Initialize PDF processor
 	pdfProcessor := service.NewPDFProcessor()
 
-	// Initialize service layer
-	incomeService := service.NewIncomeService(tesseractClient, pdfProcessor)
+	// ------------------------------------------
+	// ⭐ NEW: Initialize PaddleOCR Client here
+	// ------------------------------------------
+	paddleClient, err := client.NewPaddleClient()
+	if err != nil {
+		log.Printf("WARNING: PaddleOCR client could not initialize: %v", err)
+		paddleClient = nil
+	} else {
+		log.Println("PaddleOCR client initialized successfully")
+	}
 
-	// Initialize handler layer
+	// ------------------------------------------
+	// Create service with Paddle support
+	// ------------------------------------------
+	incomeService := service.NewIncomeService(
+		tesseractClient,
+		pdfProcessor,
+		paddleClient, // <-- IMPORTANT
+	)
+
+	// Initialize handler
 	incomeHandler := handler.NewIncomeHandler(incomeService)
 
-	// Setup Gin router
+	// Gin Router
 	router := gin.Default()
-
-	// Configure max multipart memory (32 MB)
 	router.MaxMultipartMemory = 32 << 20
 
-	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status":  "healthy",
@@ -47,7 +61,6 @@ func main() {
 		})
 	})
 
-	// API routes
 	api := router.Group("/api/v1")
 	{
 		income := api.Group("/income")
@@ -61,7 +74,6 @@ func main() {
 		}
 	}
 
-	// Start server
 	log.Printf("Starting OCR Income Verification Service on port %s", cfg.ServerPort)
 	if err := router.Run(":" + cfg.ServerPort); err != nil {
 		log.Fatalf("Failed to start server: %v", err)

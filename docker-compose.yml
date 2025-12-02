@@ -1,12 +1,19 @@
-version: '3.8'
-
 services:
+  paddle:
+    build:
+      context: .
+      dockerfile: Dockerfile.paddle
+    image: paddleocr-api # must be a single line, not a nested block
+    container_name: paddle
+    ports:
+      - "8866:8866"
+
   ocr-service:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ocr-service
     ports:
       - "8080:8080"
-    environment:
-      - SERVER_PORT=8080
-      - TESSDATA_PREFIX=/usr/share/tesseract-ocr/4.00/tessdata
-    volumes:
-      - ./test_files:/app/test_files
+    depends_on:
+      - paddle

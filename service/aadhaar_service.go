@@ -140,7 +140,13 @@ func (s *AadhaarService) extractFromOCR(img image.Image) (*dto.AadhaarExtractRes
 	// Try PaddleOCR first if available
 	if s.paddleClient != nil {
 		log.Println("Attempting PaddleOCR extraction...")
-		text, err = s.paddleClient.ExtractText(img)
+		// Convert image.Image → PNG bytes before sending to PaddleOCR
+		buf := new(bytes.Buffer)
+		if err := png.Encode(buf, img); err != nil {
+			log.Printf("failed to encode image for PaddleOCR: %v", err)
+		} else {
+			text, err = s.paddleClient.ExtractText(buf.Bytes())
+		}
 
 		if err != nil || len(strings.TrimSpace(text)) < 50 {
 			log.Printf("PaddleOCR failed or extracted insufficient text (len=%d): %v. Falling back to Tesseract...", len(text), err)

@@ -22,12 +22,18 @@ import (
 type IncomeService struct {
 	tesseractClient *client.TesseractClient
 	pdfProcessor    PDFProcessor
+	paddleClient    *client.PaddleClient
 }
 
-func NewIncomeService(tesseractClient *client.TesseractClient, pdfProcessor PDFProcessor) *IncomeService {
+func NewIncomeService(
+	tesseractClient *client.TesseractClient,
+	pdfProcessor PDFProcessor,
+	paddleClient *client.PaddleClient,
+) *IncomeService {
 	return &IncomeService{
 		tesseractClient: tesseractClient,
 		pdfProcessor:    pdfProcessor,
+		paddleClient:    paddleClient,
 	}
 }
 
@@ -159,7 +165,14 @@ func (s *IncomeService) ProcessDocument(ctx context.Context, fileHeader *multipa
 						continue
 					}
 
-					pageText, pageConf, ocrErr := s.tesseractClient.ExtractTextAndQuality(tempImgFile)
+					// Paddle first
+					pageText, ocrErr := s.paddleClient.ExtractTextFromFile(tempImgFile)
+					var pageConf float64 = 75.0
+
+					// If Paddle fails, fallback to Tesseract
+					if ocrErr != nil || len(strings.TrimSpace(pageText)) < 10 {
+						pageText, pageConf, ocrErr = s.tesseractClient.ExtractTextAndQuality(tempImgFile)
+					}
 					if ocrErr != nil {
 						log.Printf("OCR failed for a page in %s: %v", meta.Filename, ocrErr)
 						os.Remove(tempImgFile) // Clean up on error
@@ -193,6 +206,29 @@ func (s *IncomeService) ProcessDocument(ctx context.Context, fileHeader *multipa
 			quality.FinalScore = 100.0
 		}
 	} else {
+		// ---------------------------
+		// 1. Try PaddleOCR first
+		// ---------------------------
+		paddleText, err := s.paddleClient.ExtractText(data)
+		if err == nil && len(strings.TrimSpace(paddleText)) > 5 {
+			text = paddleText
+
+			quality.OcrConfidence = 75.0 // Default for PaddleOCR
+			quality.ResolutionScore = 80.0
+			quality.FinalScore = (quality.OcrConfidence + quality.ResolutionScore) / 2
+
+			// Parse based on doc type
+			if meta.DocType == dto.DocTypeSalarySlip {
+				parsed := utils.ParseSalarySlip(text)
+				parsed.Quality = quality
+				return parsed, nil
+			} else if meta.DocType == dto.DocTypeBankStatement {
+				parsed := utils.ParseBankStatement(text)
+				parsed.Quality = quality
+				return parsed, nil
+			}
+		}
+
 		// Image file
 		var conf float64
 		text, conf, err = s.tesseractClient.ExtractTextAndQualityFromFile(fileHeader)
@@ -287,4 +323,134 @@ func saveImageToTempFile(img image.Image) (string, error) {
 	}
 
 	return tempFile.Name(), nil
+}
+
+// AnalyzeITR processes an ITR document and extracts structured data
+func (s *IncomeService) AnalyzeITR(fileHeader *multipart.FileHeader) (*dto.ITRResult, error) {
+	log.Printf("Starting ITR analysis for file: %s", fileHeader.Filename)
+
+	// Open and read file
+	file, err := fileHeader.Open()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	var extractedText string
+	isPDF := strings.HasSuffix(strings.ToLower(fileHeader.Filename), ".pdf")
+
+	if isPDF {
+		// 1) Try PDF text extraction
+		text, err := s.pdfProcessor.ExtractText(fileBytes, "")
+		if err != nil {
+			log.Printf("PDF text extraction failed: %v", err)
+		} else {
+			extractedText = text
+		}
+
+		// 2) Evaluate text quality
+		textQuality := evaluateTextQuality(extractedText)
+		log.Printf("PDF text quality score: %.2f", textQuality)
+
+		// 3) If bad quality → Paddle image OCR fallback
+		if textQuality < 50.0 {
+			log.Println("Text quality low → using PaddleOCR on PDF images")
+
+			images, imgErr := s.pdfProcessor.ExtractImages(fileBytes, "")
+			if imgErr != nil || len(images) == 0 {
+				log.Printf("PDF image extraction failed: %v", imgErr)
+			} else {
+				var combined strings.Builder
+
+				for _, img := range images {
+					tmp, err := saveImageToTempFile(img)
+					if err != nil {
+						continue
+					}
+
+					ocrText, err := s.paddleClient.ExtractTextFromFile(tmp)
+					os.Remove(tmp)
+
+					if err == nil && len(strings.TrimSpace(ocrText)) > 5 {
+						combined.WriteString(ocrText)
+						combined.WriteString("\n")
+					}
+				}
+
+				textFromImages := combined.String()
+				if len(strings.TrimSpace(textFromImages)) > 20 {
+					extractedText = textFromImages
+					log.Printf("PaddleOCR extracted %d chars from PDF images", len(textFromImages))
+				}
+			}
+		}
+
+	} else {
+		// Non-PDF → standard image OCR
+		text, _, err := s.tesseractClient.ExtractTextAndQualityFromFile(fileHeader)
+		if err != nil {
+			return nil, fmt.Errorf("image OCR failed: %w", err)
+		}
+		extractedText = text
+	}
+
+	if len(strings.TrimSpace(extractedText)) == 0 {
+		return nil, fmt.Errorf("no text could be extracted from the document")
+	}
+
+	// Parse ITR data
+	result := utils.ParseITR(extractedText)
+
+	log.Printf("ITR analysis completed: PAN=%s, Name=%s, AY=%s",
+		result.PAN, result.Name, result.AssessmentYear)
+
+	return &result, nil
+}
+
+// evaluateTextQuality evaluates the quality of extracted text
+// Returns a score from 0-100 based on text length and keyword presence
+func evaluateTextQuality(text string) float64 {
+	if text == "" {
+		return 0.0
+	}
+
+	score := 0.0
+
+	// Length score (max 40 points)
+	textLen := len(strings.TrimSpace(text))
+	if textLen > 500 {
+		score += 40.0
+	} else if textLen > 100 {
+		score += 20.0
+	} else if textLen > 20 {
+		score += 10.0
+	}
+
+	// Keyword presence score (max 60 points)
+	keywords := []string{
+		"income", "tax", "pan", "assessment", "return",
+		"total", "taxable", "refund", "filing",
+	}
+
+	textLower := strings.ToLower(text)
+	keywordCount := 0
+	for _, keyword := range keywords {
+		if strings.Contains(textLower, keyword) {
+			keywordCount++
+		}
+	}
+
+	// Each keyword adds points (up to 60)
+	score += float64(keywordCount) * 6.67
+
+	if score > 100.0 {
+		score = 100.0
+	}
+
+	return score
 }

@@ -329,7 +329,6 @@ func saveImageToTempFile(img image.Image) (string, error) {
 func (s *IncomeService) AnalyzeITR(fileHeader *multipart.FileHeader) (*dto.ITRResult, error) {
 	log.Printf("Starting ITR analysis for file: %s", fileHeader.Filename)
 
-	// Open and read file
 	file, err := fileHeader.Open()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
@@ -344,70 +343,82 @@ func (s *IncomeService) AnalyzeITR(fileHeader *multipart.FileHeader) (*dto.ITRRe
 	var extractedText string
 	isPDF := strings.HasSuffix(strings.ToLower(fileHeader.Filename), ".pdf")
 
+	// ---------------------------------------------------
+	// CASE 1 — PDF (ITR files are ALWAYS PDF)
+	// ---------------------------------------------------
 	if isPDF {
-		// 1) Try PDF text extraction
+
+		// 1) Try embedded PDF text
 		text, err := s.pdfProcessor.ExtractText(fileBytes, "")
-		if err != nil {
-			log.Printf("PDF text extraction failed: %v", err)
-		} else {
+		if err == nil {
 			extractedText = text
 		}
 
-		// 2) Evaluate text quality
-		textQuality := evaluateTextQuality(extractedText)
-		log.Printf("PDF text quality score: %.2f", textQuality)
+		// 2) If extracted text is weak → use Paddle on PDF images
+		if evaluateTextQuality(extractedText) < 50 {
+			log.Println("PDF text is weak → using PaddleOCR on extracted images")
 
-		// 3) If bad quality → Paddle image OCR fallback
-		if textQuality < 50.0 {
-			log.Println("Text quality low → using PaddleOCR on PDF images")
-
-			images, imgErr := s.pdfProcessor.ExtractImages(fileBytes, "")
-			if imgErr != nil || len(images) == 0 {
-				log.Printf("PDF image extraction failed: %v", imgErr)
+			images, err := s.pdfProcessor.ExtractImages(fileBytes, "")
+			if err != nil || len(images) == 0 {
+				log.Printf("Failed to extract images from PDF: %v", err)
 			} else {
 				var combined strings.Builder
-
 				for _, img := range images {
+
 					tmp, err := saveImageToTempFile(img)
 					if err != nil {
 						continue
 					}
 
-					ocrText, err := s.paddleClient.ExtractTextFromFile(tmp)
+					paddleText, err := s.paddleClient.ExtractTextFromFile(tmp)
 					os.Remove(tmp)
 
-					if err == nil && len(strings.TrimSpace(ocrText)) > 5 {
-						combined.WriteString(ocrText)
+					if err == nil && len(strings.TrimSpace(paddleText)) > 10 {
+						combined.WriteString(paddleText)
 						combined.WriteString("\n")
 					}
 				}
 
-				textFromImages := combined.String()
-				if len(strings.TrimSpace(textFromImages)) > 20 {
-					extractedText = textFromImages
-					log.Printf("PaddleOCR extracted %d chars from PDF images", len(textFromImages))
+				// Use PaddleOCR result if it's meaningful
+				if len(strings.TrimSpace(combined.String())) > 20 {
+					extractedText = combined.String()
 				}
 			}
 		}
 
-	} else {
-		// Non-PDF → standard image OCR
-		text, _, err := s.tesseractClient.ExtractTextAndQualityFromFile(fileHeader)
-		if err != nil {
-			return nil, fmt.Errorf("image OCR failed: %w", err)
+		// 3) If still empty → final fallback: Tesseract
+		if len(strings.TrimSpace(extractedText)) == 0 {
+			text, _, err := s.tesseractClient.ExtractTextAndQualityFromFile(fileHeader)
+			if err == nil {
+				extractedText = text
+			}
 		}
-		extractedText = text
+
+	} else {
+
+		// ---------------------------------------------------
+		// CASE 2 — Non-PDF → PNG/JPG → Paddle first
+		// ---------------------------------------------------
+		paddleText, err := s.paddleClient.ExtractText(fileBytes)
+		if err == nil && len(strings.TrimSpace(paddleText)) > 5 {
+			extractedText = paddleText
+		} else {
+			// fallback to Tesseract
+			text, _, err := s.tesseractClient.ExtractTextAndQualityFromFile(fileHeader)
+			if err != nil {
+				return nil, fmt.Errorf("OCR failed: %w", err)
+			}
+			extractedText = text
+		}
 	}
 
 	if len(strings.TrimSpace(extractedText)) == 0 {
 		return nil, fmt.Errorf("no text could be extracted from the document")
 	}
 
-	// Parse ITR data
 	result := utils.ParseITR(extractedText)
 
-	log.Printf("ITR analysis completed: PAN=%s, Name=%s, AY=%s",
-		result.PAN, result.Name, result.AssessmentYear)
+	log.Printf("ITR analysis done → PAN=%s Name=%s AY=%s", result.PAN, result.Name, result.AssessmentYear)
 
 	return &result, nil
 }

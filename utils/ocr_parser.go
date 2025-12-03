@@ -456,22 +456,88 @@ func min(a, b, c int) int {
 }
 
 // ParseITR extracts structured data from ITR (Income Tax Return) OCR text
+// =========================
+//  ITR PARSER (ITR-V / ITR-1 / ITR-3 / ITR-4)
+// =========================
+
+// -----------------------
+// Parse ITR (ITR-V, ITR-1, ITR-3, ITR-4)
+// -----------------------
 func ParseITR(ocrText string) dto.ITRResult {
-	return dto.ITRResult{
-		PAN:            extractPAN(ocrText),
-		Name:           extractITRName(ocrText),
-		AssessmentYear: extractAssessmentYear(ocrText),
-		TotalIncome:    extractTotalIncome(ocrText),
-		TaxableIncome:  extractTaxableIncome(ocrText),
-		TaxPaid:        extractTaxPaid(ocrText),
-		RefundAmount:   extractRefundAmount(ocrText),
-		FilingDate:     extractFilingDate(ocrText),
-		RawText:        ocrText,
+	lines := splitAndTrimLines(ocrText)
+
+	res := dto.ITRResult{
+		RawText: ocrText,
 	}
+
+	// -----------------------
+	// 1. PAN (OCR missing in sample)
+	// -----------------------
+	res.PAN = extractPAN(ocrText)
+
+	// -----------------------
+	// 2. Assessment Year
+	// -----------------------
+	res.AssessmentYear = extractAssessmentYearFromLines(lines)
+	if res.AssessmentYear == "" {
+		res.AssessmentYear = extractAssessmentYear(ocrText)
+	}
+
+	// -----------------------
+	// 3. NAME (fix: ignore section headers)
+	// -----------------------
+	res.Name = extractNameSmart(lines)
+
+	// -----------------------
+	// 4. TOTAL INCOME
+	// -----------------------
+	if v := extractNumberUnderLabelSmart(lines, "Total Income"); v > 0 {
+		res.TotalIncome = v
+	} else {
+		res.TotalIncome = extractTotalIncome(ocrText)
+	}
+
+	// -----------------------
+	// 5. TAX PAID
+	// -----------------------
+	if v := extractNumberUnderLabelSmart(lines, "Taxes Paid"); v > 0 {
+		res.TaxPaid = v
+	} else {
+		res.TaxPaid = extractTaxPaid(ocrText)
+	}
+
+	// -----------------------
+	// 6. REFUND AMOUNT (fix row label issue)
+	// -----------------------
+	res.RefundAmount = extractRefundSmart(lines)
+
+	// -----------------------
+	// 7. FILING DATE
+	// -----------------------
+	res.FilingDate = extractITRFilingDate(lines)
+
+	return res
 }
 
-// extractPAN extracts PAN number from ITR text
-// PAN format: ABCDE1234F (5 letters, 4 digits, 1 letter)
+// ----- ITR helpers -----
+
+func splitAndTrimLines(text string) []string {
+	raw := strings.Split(text, "\n")
+	out := make([]string, 0, len(raw))
+	for _, l := range raw {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func cleanLabel(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(s, ":", ""))
+}
+
+// PAN format ABCDE1234F
 func extractPAN(text string) string {
 	panPattern := regexp.MustCompile(`\b([A-Z]{5}[0-9]{4}[A-Z])\b`)
 	if matches := panPattern.FindStringSubmatch(text); len(matches) > 1 {
@@ -480,7 +546,45 @@ func extractPAN(text string) string {
 	return ""
 }
 
-// extractITRName extracts taxpayer name from ITR text
+func extractAssessmentYearFromLines(lines []string) string {
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(line), "assessment year") {
+			for j := 1; j <= 3 && i+j < len(lines); j++ {
+				cand := cleanLabel(lines[i+j])
+				if regexp.MustCompile(`^\d{4}-\d{2,4}$`).MatchString(cand) {
+					return cand
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func extractITRNameFromLines(lines []string) string {
+	for i, line := range lines {
+		if strings.EqualFold(cleanLabel(line), "Name") {
+			for j := 1; j <= 3 && i+j < len(lines); j++ {
+				cand := cleanLabel(lines[i+j])
+				if cand == "" {
+					continue
+				}
+				lower := strings.ToLower(cand)
+				if lower == "address" || lower == "status" ||
+					strings.Contains(lower, "individual") ||
+					strings.Contains(lower, "huf") ||
+					strings.Contains(lower, "company") {
+					continue
+				}
+				if regexp.MustCompile(`^[A-Za-z]`).MatchString(cand) {
+					return cand
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// Generic regex-based ITR name extractor (for other layouts)
 func extractITRName(text string) string {
 	patterns := []string{
 		`(?i)name\s*of\s*(?:the\s*)?(?:assessee|taxpayer)[:\s]*([A-Z][a-zA-Z\s\.]{2,50})`,
@@ -493,7 +597,6 @@ func extractITRName(text string) string {
 		re := regexp.MustCompile(pattern)
 		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
 			name := strings.TrimSpace(matches[1])
-			// Clean up name - remove trailing non-letter characters
 			name = regexp.MustCompile(`[^a-zA-Z\s]+$`).ReplaceAllString(name, "")
 			name = strings.TrimSpace(name)
 			if len(name) > 2 && len(name) < 50 {
@@ -504,8 +607,6 @@ func extractITRName(text string) string {
 	return ""
 }
 
-// extractAssessmentYear extracts assessment year from ITR text
-// Format: 2023-24, 2023-2024, AY 2023-24, etc.
 func extractAssessmentYear(text string) string {
 	patterns := []string{
 		`(?i)assessment\s*year[:\s]*(\d{4}[-]\d{2,4})`,
@@ -522,74 +623,36 @@ func extractAssessmentYear(text string) string {
 	return ""
 }
 
-// extractTotalIncome extracts total income from ITR text
-func extractTotalIncome(text string) float64 {
-	patterns := []string{
-		`(?i)total\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)gross\s*total\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)income\s*under\s*all\s*heads[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-	}
-
-	return extractAmount(text, patterns)
-}
-
-// extractTaxableIncome extracts taxable income from ITR text
-func extractTaxableIncome(text string) float64 {
-	patterns := []string{
-		`(?i)taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)total\s*taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)net\s*taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-	}
-
-	return extractAmount(text, patterns)
-}
-
-// extractTaxPaid extracts tax paid from ITR text
-func extractTaxPaid(text string) float64 {
-	patterns := []string{
-		`(?i)tax\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)total\s*tax\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)taxes\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)tax\s*liability[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-	}
-
-	return extractAmount(text, patterns)
-}
-
-// extractRefundAmount extracts refund amount from ITR text
-func extractRefundAmount(text string) float64 {
-	patterns := []string{
-		`(?i)refund[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)refund\s*amount[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-		`(?i)amount\s*refundable[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
-	}
-
-	return extractAmount(text, patterns)
-}
-
-// extractFilingDate extracts filing date from ITR text
-func extractFilingDate(text string) string {
-	patterns := []string{
-		`(?i)filing\s*date[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})`,
-		`(?i)date\s*of\s*filing[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})`,
-		`(?i)filed\s*on[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})`,
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
-			dateStr := matches[1]
-			// Try to parse and format the date
-			if parsedDate, err := parseDate(dateStr); err == nil {
-				return parsedDate.Format("2006-01-02")
+// find number in rows like:
+//
+//	Total Income
+//	160850
+//
+// or
+//
+//	Taxes Paid
+//	7
+//	9500
+func extractNumberUnderLabel(lines []string, label string) float64 {
+	for i, line := range lines {
+		if cleanLabel(line) == label {
+			for j := 1; j <= 4 && i+j < len(lines); j++ {
+				cand := cleanLabel(lines[i+j])
+				if len(cand) <= 1 {
+					continue // skip row codes like "1", "7", "8"
+				}
+				cand = strings.ReplaceAll(cand, ",", "")
+				if f, err := strconv.ParseFloat(cand, 64); err == nil {
+					return f
+				}
 			}
-			return dateStr
 		}
 	}
-	return ""
+	return 0
 }
 
-// extractAmount is a helper function to extract monetary amounts
+// === numeric extractors shared between ITR layouts ===
+
 func extractAmount(text string, patterns []string) float64 {
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(pattern)
@@ -601,4 +664,216 @@ func extractAmount(text string, patterns []string) float64 {
 		}
 	}
 	return 0.0
+}
+
+func extractTotalIncome(text string) float64 {
+	patterns := []string{
+		`(?i)total\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)gross\s*total\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)income\s*under\s*all\s*heads[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+	}
+	return extractAmount(text, patterns)
+}
+
+func extractTaxableIncome(text string) float64 {
+	patterns := []string{
+		`(?i)taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)total\s*taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)net\s*taxable\s*income[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+	}
+	return extractAmount(text, patterns)
+}
+
+func extractTaxPaid(text string) float64 {
+	patterns := []string{
+		`(?i)tax\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)total\s*tax\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)taxes\s*paid[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+		`(?i)tax\s*liability[:\s]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
+	}
+	return extractAmount(text, patterns)
+}
+
+func extractRefundFromLines(lines []string, taxPaid float64) float64 {
+	// ITR-V / Ack layout example:
+	// "+)Tax Payable/-)Refundable6-7"
+	// 8
+	// -9500
+	for i, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "refundable") || strings.Contains(lower, "refund") {
+			for j := 1; j <= 3 && i+j < len(lines); j++ {
+				cand := cleanLabel(lines[i+j])
+				cand = strings.ReplaceAll(cand, ",", "")
+				if f, err := strconv.ParseFloat(cand, 64); err == nil {
+					if f < 0 {
+						return -f
+					}
+					return f
+				}
+			}
+		}
+	}
+
+	// Fallback: nothing explicit, just return 0 for safety
+	_ = taxPaid
+	return 0
+}
+
+func extractITRFilingDate(lines []string) string {
+	// We accept dates like 21-08-2020, 21/08/2020
+	dateRegex := regexp.MustCompile(`(\d{2})[-/](\d{2})[-/](\d{4})`)
+
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), "electronically") ||
+			strings.Contains(strings.ToLower(line), "submitted") ||
+			strings.Contains(strings.ToLower(line), "on") ||
+			strings.Contains(strings.ToLower(line), "acknowledgement") {
+
+			if m := dateRegex.FindStringSubmatch(line); len(m) == 4 {
+				raw := m[0]
+				if t, err := time.Parse("02-01-2006", m[1]+"-"+m[2]+"-"+m[3]); err == nil {
+					return t.Format("2006-01-02")
+				}
+				if t, err := time.Parse("02/01/2006", m[1]+"/"+m[2]+"/"+m[3]); err == nil {
+					return t.Format("2006-01-02")
+				}
+				return raw
+			}
+		}
+	}
+
+	// Last fallback: any date anywhere
+	for _, line := range lines {
+		if m := dateRegex.FindStringSubmatch(line); len(m) == 4 {
+			raw := m[0]
+			if t, err := time.Parse("02-01-2006", m[1]+"-"+m[2]+"-"+m[3]); err == nil {
+				return t.Format("2006-01-02")
+			}
+			if t, err := time.Parse("02/01/2006", m[1]+"/"+m[2]+"/"+m[3]); err == nil {
+				return t.Format("2006-01-02")
+			}
+			return raw
+		}
+	}
+
+	return ""
+}
+func extractNameSmart(lines []string) string {
+	sectionWords := map[string]bool{
+		"address": true, "status": true, "individual": true,
+		"form number": true, "form": true, "itr": true,
+	}
+
+	for i, line := range lines {
+		if strings.EqualFold(cleanLabel(line), "Name") {
+
+			// check next 3 lines
+			for j := 1; j <= 3 && i+j < len(lines); j++ {
+				cand := cleanLabel(lines[i+j])
+				l := strings.ToLower(cand)
+
+				// ❌ Reject section headers
+				if sectionWords[l] || len(cand) <= 2 {
+					continue
+				}
+
+				// valid name begins with alphabet
+				if regexp.MustCompile(`^[A-Za-z]`).MatchString(cand) {
+					return cand
+				}
+			}
+
+			// If everything looks like section headers → name not found
+			return ""
+		}
+	}
+	return ""
+}
+
+func extractRefundSmart(lines []string) float64 {
+	for i, line := range lines {
+		l := strings.ToLower(line)
+
+		if strings.Contains(l, "refundable") || strings.Contains(l, "tax payable") {
+
+			// scan next 4 lines
+			for j := 1; j <= 4 && i+j < len(lines); j++ {
+				cand := cleanLabel(lines[i+j])
+				cand = strings.ReplaceAll(cand, ",", "")
+
+				// Skip row index numbers like "1", "7", "8", "19"
+				if len(cand) <= 2 {
+					continue
+				}
+
+				// look for negative or large number
+				if f, err := strconv.ParseFloat(cand, 64); err == nil {
+					if f < 0 {
+						return -f
+					}
+					if f > 1000 { // refund usually > 1000
+						return f
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// extractNumericValue extracts int/float even if stuck to stray characters.
+// Returns -999999 if not a valid number.
+func extractNumericValue(s string) float64 {
+	// keep digits, minus, dot only
+	re := regexp.MustCompile(`-?[0-9]+\.?[0-9]*`)
+	match := re.FindString(s)
+	if match == "" {
+		return -999999
+	}
+
+	v, err := strconv.ParseFloat(match, 64)
+	if err != nil {
+		return -999999
+	}
+	return v
+}
+
+// extractNumberUnderLabelSmart finds the numeric value under a label like "Total Income", "Taxes Paid", etc.
+// It scans the next 3–5 lines and intelligently ignores row numbers like 1, 2, 7, 8.
+func extractNumberUnderLabelSmart(lines []string, label string) float64 {
+	clean := func(s string) string {
+		s = strings.TrimSpace(strings.ReplaceAll(s, ":", ""))
+		s = strings.ReplaceAll(s, "—", "-")
+		s = strings.ReplaceAll(s, " ", "")
+		return s
+	}
+
+	lowerLabel := strings.ToLower(label)
+
+	for i, line := range lines {
+		if strings.ToLower(strings.TrimSpace(line)) == lowerLabel {
+
+			// Look ahead safely
+			for j := 1; j <= 5 && i+j < len(lines); j++ {
+				look := clean(lines[i+j])
+				if look == "" {
+					continue
+				}
+
+				// skip row indices like "1", "2", "8", "19"
+				if regexp.MustCompile(`^[0-9]{1,2}$`).MatchString(look) {
+					continue
+				}
+
+				// attempt numeric extraction
+				v := extractNumericValue(look)
+				if v != -999999 {
+					return v
+				}
+			}
+		}
+	}
+
+	return 0
 }

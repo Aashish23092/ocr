@@ -14,6 +14,7 @@ ocr = PaddleOCR(
     ocr_version='PP-OCRv3',
     show_log=True
 )
+# ocr = None
 
 def load_image_safely(file_bytes):
     np_img = np.frombuffer(file_bytes, np.uint8)
@@ -43,24 +44,30 @@ def ocr_route():
     if img is None:
         return jsonify({"error": "failed to decode image"}), 400
 
-    print("DEBUG: Loaded image:", img.shape)
+
 
     try:
         result = ocr.ocr(img, cls=True)
 
-        # Debug print
-        print("\nRAW OCR RESULT:", json.dumps(result, indent=2, default=str))
-
-        if not result or not result[0]:
-            return jsonify({"text": ""}), 200
+        # Determine if result is [block, block] or [[block, block]]
+        blocks = []
+        if isinstance(result[0], (list, tuple)) and len(result[0]) == 2 and \
+           isinstance(result[0][0], (list, tuple)) and len(result[0][0]) == 4:
+            blocks = result
+        elif isinstance(result[0], (list, tuple)):
+            blocks = result[0]
+        
+        if not blocks:
+             return jsonify({"text": ""}), 200
 
         # Extract ALL text from the blocks
         extracted = []
-        for block in result[0]:
+        for block in blocks:
             if isinstance(block, (list, tuple)) and len(block) >= 2:
                 text_block = block[1]
                 if isinstance(text_block, (list, tuple)) and len(text_block) >= 1:
-                    extracted.append(str(text_block[0]))
+                    text = str(text_block[0])
+                    extracted.append(text)
 
         final_text = "\n".join(extracted)
         return jsonify({"text": final_text}), 200

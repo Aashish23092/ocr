@@ -49,6 +49,9 @@ func main() {
 
 	// Initialize handler
 	incomeHandler := handler.NewIncomeHandler(incomeService)
+	// Aadhaar Service
+	aadhaarService := service.NewAadhaarService(tesseractClient, pdfProcessor)
+	aadhaarHandler := handler.NewAadhaarHandler(aadhaarService)
 
 	// Gin Router
 	router := gin.Default()
@@ -71,6 +74,10 @@ func main() {
 		itr := api.Group("/itr")
 		{
 			itr.POST("/analyze", incomeHandler.AnalyzeITR)
+		}
+		aadhaar := api.Group("/aadhaar")
+		{
+			aadhaar.POST("/extract", aadhaarHandler.ExtractAadhaar)
 		}
 	}
 

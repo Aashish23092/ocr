@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"strings"
 
@@ -28,32 +29,84 @@ func NewAadhaarHandler(aadhaarService *service.AadhaarService) *AadhaarHandler {
 func (h *AadhaarHandler) ExtractAadhaar(c *gin.Context) {
 	log.Println("Received Aadhaar extraction request")
 
-	// Parse multipart form
-	file, err := c.FormFile("file")
-	if err != nil {
-		h.sendError(c, http.StatusBadRequest, "File is required", err)
-		return
+	// Parse multipart form (must read both return values)
+	form, err := c.MultipartForm()
+	var files []*multipart.FileHeader
+
+	// CASE A → multiple files uploaded under "file"
+	if err == nil && form != nil && len(form.File["file"]) > 1 {
+		files = form.File["file"]
+
+	} else {
+		// CASE B → single file
+		f, err := c.FormFile("file")
+		if err != nil {
+			h.sendError(c, http.StatusBadRequest, "At least one file is required", err)
+			return
+		}
+		files = []*multipart.FileHeader{f}
 	}
 
-	// Get optional password
 	password := c.PostForm("password")
 
-	// Build request DTO
-	request := &dto.AadhaarExtractRequest{
-		File:     file,
-		Password: password,
-	}
+	// ----------------------------------------------------
+	// CASE 1 → MULTIPLE IMAGE INPUTS
+	// ----------------------------------------------------
+	if len(files) > 1 {
+		log.Printf("Received %d Aadhaar images → Multi-page Aadhaar processing", len(files))
 
-	// Validate request
-	if err := request.Validate(); err != nil {
-		h.sendError(c, http.StatusBadRequest, err.Error(), err)
+		var imagesData [][]byte
+		var mimeTypes []string
+
+		for _, file := range files {
+			reader, err := file.Open()
+			if err != nil {
+				h.sendError(c, http.StatusInternalServerError, "Failed to open one of the uploaded files", err)
+				return
+			}
+			data, err := io.ReadAll(reader)
+			reader.Close()
+
+			if err != nil {
+				h.sendError(c, http.StatusInternalServerError, "Failed to read uploaded image", err)
+				return
+			}
+
+			mimeType := file.Header.Get("Content-Type")
+			if mimeType == "" {
+				mimeType = inferMimeType(file.Filename)
+			}
+
+			if !isValidMimeType(mimeType) {
+				h.sendError(c, http.StatusBadRequest, "Invalid file type. Supported: PDF, PNG, JPEG", nil)
+				return
+			}
+
+			imagesData = append(imagesData, data)
+			mimeTypes = append(mimeTypes, mimeType)
+		}
+
+		// MULTI-PAGE Aadhaar extraction
+		ctx := context.Background()
+		result, err := h.aadhaarService.ExtractFromImages(ctx, imagesData, mimeTypes, password)
+		if err != nil {
+			h.sendError(c, http.StatusInternalServerError, "Failed to extract Aadhaar from multiple images", err)
+			return
+		}
+
+		log.Println("Aadhaar extraction completed successfully (multi-image)")
+		c.JSON(http.StatusOK, result)
 		return
 	}
 
-	// Validate MIME type
+	// ----------------------------------------------------
+	// CASE 2 → SINGLE FILE INPUT
+	// ----------------------------------------------------
+	file := files[0]
+	log.Printf("Processing single Aadhaar file: %s", file.Filename)
+
 	mimeType := file.Header.Get("Content-Type")
 	if mimeType == "" {
-		// Infer from extension
 		mimeType = inferMimeType(file.Filename)
 	}
 
@@ -62,38 +115,32 @@ func (h *AadhaarHandler) ExtractAadhaar(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Processing file: %s (type: %s, size: %d bytes)", file.Filename, mimeType, file.Size)
-
-	// Read file data
-	fileReader, err := file.Open()
+	reader, err := file.Open()
 	if err != nil {
 		h.sendError(c, http.StatusInternalServerError, "Failed to open uploaded file", err)
 		return
 	}
-	defer fileReader.Close()
+	defer reader.Close()
 
-	fileData, err := io.ReadAll(fileReader)
+	fileData, err := io.ReadAll(reader)
 	if err != nil {
 		h.sendError(c, http.StatusInternalServerError, "Failed to read file data", err)
 		return
 	}
 
-	// Call service layer
 	ctx := context.Background()
-	response, err := h.aadhaarService.ExtractFromFile(ctx, fileData, mimeType, password)
+	result, err := h.aadhaarService.ExtractFromFile(ctx, fileData, mimeType, password)
 	if err != nil {
-		// Check if it's a password error
-		if strings.Contains(err.Error(), "decrypt") || strings.Contains(err.Error(), "password") {
+		if strings.Contains(err.Error(), "decrypt") {
 			h.sendError(c, http.StatusBadRequest, "Failed to decrypt PDF. Check password.", err)
 			return
 		}
-		h.sendError(c, http.StatusInternalServerError, "Failed to extract Aadhaar data", err)
+		h.sendError(c, http.StatusInternalServerError, "Failed to extract Aadhaar", err)
 		return
 	}
 
-	// Send success response
 	log.Println("Aadhaar extraction completed successfully")
-	c.JSON(http.StatusOK, response)
+	c.JSON(http.StatusOK, result)
 }
 
 // sendError sends a structured error response

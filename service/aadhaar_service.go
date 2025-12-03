@@ -44,15 +44,17 @@ func NewAadhaarService(tesseractClient *client.TesseractClient, pdfProcessor PDF
 
 // ExtractFromFile extracts Aadhaar data from a file (PDF or image)
 func (s *AadhaarService) ExtractFromFile(ctx context.Context, fileData []byte, mimeType, password string) (*dto.AadhaarExtractResponse, error) {
+	var images []image.Image
 	var img image.Image
 	var err error
 
-	// Handle PDF files
+	// ---------------------------------------------
+	// 1️⃣ PDF → extract ALL pages as images
+	// ---------------------------------------------
 	if strings.Contains(mimeType, "pdf") {
 		log.Println("Processing PDF file for Aadhaar extraction")
 
-		// Extract images from PDF (we'll use the first page)
-		images, err := s.pdfProcessor.ExtractImages(fileData, password)
+		images, err = s.pdfProcessor.ExtractImages(fileData, password)
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract images from PDF: %w", err)
 		}
@@ -61,11 +63,18 @@ func (s *AadhaarService) ExtractFromFile(ctx context.Context, fileData []byte, m
 			return nil, fmt.Errorf("no images found in PDF")
 		}
 
-		// Use the first page
-		img = images[0]
-		log.Println("Extracted first page from PDF as image")
+		// Aadhaar identity info is almost always on page 2
+		if len(images) > 1 {
+			log.Println("Using page 2 (Aadhaar front side with Name/DOB/Gender)")
+			img = images[1]
+		} else {
+			log.Println("PDF has only one page; using page 1")
+			img = images[0]
+		}
 	} else {
-		// Handle image files (PNG, JPEG)
+		// ---------------------------------------------
+		// 2️⃣ PNG/JPEG case
+		// ---------------------------------------------
 		log.Println("Processing image file for Aadhaar extraction")
 		img, err = decodeImage(fileData, mimeType)
 		if err != nil {
@@ -73,7 +82,9 @@ func (s *AadhaarService) ExtractFromFile(ctx context.Context, fileData []byte, m
 		}
 	}
 
-	// Try QR code extraction first
+	// ---------------------------------------------
+	// 3️⃣ QR extraction (first attempt)
+	// ---------------------------------------------
 	log.Println("Attempting QR code extraction...")
 	qrResult, err := s.extractFromQR(img)
 	if err == nil && qrResult != nil {
@@ -82,15 +93,58 @@ func (s *AadhaarService) ExtractFromFile(ctx context.Context, fileData []byte, m
 	}
 	log.Printf("QR extraction failed or no QR found: %v. Falling back to OCR...", err)
 
-	// Fallback to OCR
-	log.Println("Attempting OCR extraction...")
-	ocrResult, err := s.extractFromOCR(img)
-	if err != nil {
-		return nil, fmt.Errorf("both QR and OCR extraction failed: %w", err)
+	// ---------------------------------------------
+	// 4️⃣ OCR on ALL PAGES (Name/DOB/Gender often exist on page 2)
+	// ---------------------------------------------
+	var fullText strings.Builder
+
+	if len(images) > 0 {
+		log.Printf("Running OCR on %d pages...", len(images))
+		for idx, page := range images {
+			log.Printf("OCR on page %d...", idx+1)
+
+			buf := new(bytes.Buffer)
+			if err := png.Encode(buf, page); err != nil {
+				log.Printf("Failed to encode page %d: %v", idx+1, err)
+				continue
+			}
+
+			pageText, err := s.paddleClient.ExtractText(buf.Bytes())
+			if err != nil {
+				log.Printf("Page %d OCR failed: %v", idx+1, err)
+				continue
+			}
+
+			fullText.WriteString("\n")
+			fullText.WriteString(pageText)
+		}
+	} else {
+		// Single image case
+		pageText, err := s.paddleClient.ExtractText(fileData)
+		if err != nil {
+			return nil, fmt.Errorf("OCR extraction failed: %w", err)
+		}
+		fullText.WriteString(pageText)
 	}
 
-	log.Println("Successfully extracted data using OCR")
-	return ocrResult, nil
+	ocrText := fullText.String()
+
+	// Debug dump
+	log.Println("=========== OCR RAW OUTPUT BEGIN ===========")
+	log.Println(ocrText)
+	log.Println("=========== OCR RAW OUTPUT END =============")
+
+	// ---------------------------------------------
+	// 5️⃣ Parse Aadhaar info from combined OCR text
+	// ---------------------------------------------
+	result := utils.ParseAadhaarFromText(ocrText)
+
+	// If even combined OCR yields nothing meaningful → error
+	if result.Name == "" && result.AadhaarLast4 == "" {
+		return nil, fmt.Errorf("could not extract meaningful Aadhaar data from OCR text")
+	}
+
+	return &result, nil
 }
 
 // extractFromQR attempts to extract Aadhaar data from QR code
@@ -232,4 +286,85 @@ func saveAadhaarImageToTempFile(img image.Image) (string, error) {
 	}
 
 	return tempFile.Name(), nil
+}
+
+// ExtractFromImages processes 2 or more Aadhaar images (front + back)
+func (s *AadhaarService) ExtractFromImages(
+	ctx context.Context,
+	imagesData [][]byte,
+	mimeTypes []string,
+	password string,
+) (*dto.AadhaarExtractResponse, error) {
+
+	if len(imagesData) == 0 {
+		return nil, fmt.Errorf("no images provided")
+	}
+
+	// Decode all images
+	var images []image.Image
+	for i := range imagesData {
+		img, err := decodeImage(imagesData[i], mimeTypes[i])
+		if err != nil {
+			log.Printf("Failed to decode image %d: %v", i+1, err)
+			continue
+		}
+		images = append(images, img)
+	}
+
+	if len(images) == 0 {
+		return nil, fmt.Errorf("failed to decode any Aadhaar image")
+	}
+
+	// -------------------------------------------------------------
+	// 1️⃣ Try QR extraction from ALL pages (QR often on back side)
+	// -------------------------------------------------------------
+	for i, img := range images {
+		log.Printf("Trying QR extraction on image %d...", i+1)
+		qr, err := s.extractFromQR(img)
+		if err == nil && qr != nil {
+			log.Println("QR extraction succeeded")
+			return qr, nil
+		}
+	}
+
+	// -------------------------------------------------------------
+	// 2️⃣ OCR on ALL images → Combine text intelligently
+	// -------------------------------------------------------------
+	var combined strings.Builder
+
+	for i, img := range images {
+		log.Printf("Running OCR on image %d...", i+1)
+
+		buf := new(bytes.Buffer)
+		if err := png.Encode(buf, img); err != nil {
+			log.Printf("PNG encode failed for image %d: %v", i+1, err)
+			continue
+		}
+
+		pageText, err := s.paddleClient.ExtractText(buf.Bytes())
+		if err != nil {
+			log.Printf("OCR failed for image %d: %v", i+1, err)
+			continue
+		}
+
+		combined.WriteString("\n")
+		combined.WriteString(pageText)
+	}
+
+	fullText := combined.String()
+
+	log.Println("=========== OCR RAW OUTPUT BEGIN ===========")
+	log.Println(fullText)
+	log.Println("=========== OCR RAW OUTPUT END =============")
+
+	// -------------------------------------------------------------
+	// 3️⃣ Parse combined OCR text for Aadhaar data
+	// -------------------------------------------------------------
+	result := utils.ParseAadhaarFromText(fullText)
+
+	if result.Name == "" && result.AadhaarLast4 == "" {
+		return nil, fmt.Errorf("could not extract valid Aadhaar details from OCR text")
+	}
+
+	return &result, nil
 }

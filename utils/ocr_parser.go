@@ -10,26 +10,56 @@ import (
 	"github.com/Aashish23092/ocr-income-verification/dto"
 )
 
-// ParseSalarySlip extracts structured data from salary slip OCR text
+// =============================
+// SALARY SLIP PARSER
+// =============================
+
 func ParseSalarySlip(ocrText string) dto.SalarySlipData {
 	return dto.SalarySlipData{
 		PayMonth:      extractMonth(ocrText),
 		NetSalary:     extractSalaryAmount(ocrText),
 		AccountNumber: extractAccountNumber(ocrText),
 		EmployeeName:  extractEmployeeName(ocrText),
+		EmployerName:  extractEmployerName(ocrText),
 	}
 }
 
-// ParseBankStatement extracts structured data from bank statement OCR text
-func ParseBankStatement(ocrText string) dto.BankStatementData {
-	return dto.BankStatementData{
-		AccountNumber:     extractAccountNumber(ocrText),
-		AccountHolderName: extractAccountHolderName(ocrText),
-		Transactions:      extractSalaryCredits(ocrText),
+// extractEmployerName attempts to detect the company name from salary slips.
+// Strategy:
+// 1) First line(s) of salary slips almost always contain company name
+// 2) Look for words like "Private Limited", "Pvt", "Ltd", "LLP", etc.
+// 3) If detected, return that line as employer name
+func extractEmployerName(text string) string {
+	lines := strings.Split(text, "\n")
+
+	// scan first 5 meaningful lines
+	for i := 0; i < len(lines) && i < 6; i++ {
+		l := strings.TrimSpace(lines[i])
+		if l == "" {
+			continue
+		}
+
+		upper := strings.ToUpper(l)
+
+		// corporate suffix indicators
+		if strings.Contains(upper, "PVT") ||
+			strings.Contains(upper, "PRIVATE") ||
+			strings.Contains(upper, "LTD") ||
+			strings.Contains(upper, "LIMITED") ||
+			strings.Contains(upper, "LLP") ||
+			strings.Contains(upper, "TECHNOLOGY") ||
+			strings.Contains(upper, "TECH") ||
+			strings.Contains(upper, "SOLUTIONS") {
+
+			// clean trailing punctuation
+			l = strings.Trim(l, "-:•* ")
+			return l
+		}
 	}
+
+	return ""
 }
 
-// extractMonth extracts month information from text
 func extractMonth(text string) string {
 	months := []string{
 		"January", "February", "March", "April", "May", "June",
@@ -40,7 +70,6 @@ func extractMonth(text string) string {
 	textLower := strings.ToLower(text)
 	for _, month := range months {
 		if strings.Contains(textLower, strings.ToLower(month)) {
-			// Try to extract year as well
 			yearRegex := regexp.MustCompile(`(?i)` + month + `[\s\-,]*(\d{4})`)
 			if matches := yearRegex.FindStringSubmatch(text); len(matches) > 1 {
 				return month + " " + matches[1]
@@ -49,25 +78,20 @@ func extractMonth(text string) string {
 		}
 	}
 
-	// Try date format MM/YYYY or MM-YYYY
 	dateRegex := regexp.MustCompile(`(\d{1,2})[/-](\d{4})`)
 	if matches := dateRegex.FindStringSubmatch(text); len(matches) > 2 {
 		return matches[1] + "/" + matches[2]
 	}
-
 	return "Unknown"
 }
 
-// extractSalaryAmount extracts salary amount from text
 func extractSalaryAmount(text string) float64 {
-	// Patterns for salary amounts
 	patterns := []string{
 		`(?i)net\s*(?:pay|salary|amount|payment)[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
 		`(?i)total\s*(?:pay|salary|amount)[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
 		`(?i)salary[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
 		`(?i)gross\s*(?:pay|salary)[\s:]*(?:Rs\.?|INR|₹)?\s*([0-9,]+\.?\d*)`,
 	}
-
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(pattern)
 		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
@@ -77,92 +101,76 @@ func extractSalaryAmount(text string) float64 {
 			}
 		}
 	}
-
 	return 0.0
 }
 
-// extractAccountNumber extracts bank account number from text
-func extractAccountNumber(text string) string {
-	cleaned := strings.ReplaceAll(text, "—", "-")
-	cleaned = strings.ReplaceAll(cleaned, ":", " ")
-	cleaned = strings.ReplaceAll(cleaned, "|", " ")
-	cleaned = strings.ToLower(cleaned)
+// =============================
+// ACCOUNT NUMBER & NAME HELPERS
+// =============================
 
-	// 1️⃣ PRIORITY: Explicit account number labels (HIGHEST accuracy)
-	explicitPatterns := []string{
+func extractAccountNumber(text string) string {
+	cleaned := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(text, "—", "-"), ":", " "))
+
+	explicit := []string{
 		`account\s*no[\s\-]*([0-9]{9,18})`,
 		`accountnumber[\s\-]*([0-9]{9,18})`,
 		`a/c\s*no[\s\-]*([0-9]{9,18})`,
 		`ac\s*no[\s\-]*([0-9]{9,18})`,
 		`acc\s*no[\s\-]*([0-9]{9,18})`,
 	}
-
-	for _, p := range explicitPatterns {
+	for _, p := range explicit {
 		re := regexp.MustCompile(p)
-		if matches := re.FindStringSubmatch(cleaned); len(matches) > 1 {
-			return matches[1]
+		if m := re.FindStringSubmatch(cleaned); len(m) > 1 {
+			return m[1]
 		}
 	}
 
-	// 2️⃣ Masked formats like XXXXXXXX6323
 	masked := regexp.MustCompile(`x{4,}[0-9]{3,6}`)
 	if m := masked.FindString(cleaned); m != "" {
-		// Extract last digits only
-		digits := regexp.MustCompile(`[0-9]+`).FindString(m)
-		if len(digits) >= 4 {
-			return digits
-		}
+		return regexp.MustCompile(`[0-9]+`).FindString(m)
 	}
 
-	// 3️⃣ Fallback: 9–18 digit numbers, but EXCLUDE cust id, cif, etc
 	fallback := regexp.MustCompile(`([0-9]{9,18})`)
-	candidates := fallback.FindAllString(cleaned, -1)
-
-	for _, c := range candidates {
-		// Reject typical non-account number fields
-		if strings.Contains(cleaned, "cust id "+c) ||
-			strings.Contains(cleaned, "customer id "+c) ||
-			strings.Contains(cleaned, "cif "+c) ||
-			strings.Contains(cleaned, "custid "+c) {
-			continue
-		}
-
-		// Bank accounts are usually ≥ 10 digits, but not 8 digits
-		if len(c) >= 10 {
+	cands := fallback.FindAllString(cleaned, -1)
+	for _, c := range cands {
+		if len(c) >= 10 &&
+			!strings.Contains(cleaned, "cust id "+c) &&
+			!strings.Contains(cleaned, "customer id "+c) &&
+			!strings.Contains(cleaned, "cif "+c) {
 			return c
 		}
 	}
-
 	return ""
 }
 
-// extractEmployeeName extracts employee name from salary slip
+// Employee name extraction (unchanged)
+
 func extractEmployeeName(text string) string {
 	lines := strings.Split(text, "\n")
-
 	for i, line := range lines {
 		lower := strings.ToLower(line)
-
 		if strings.Contains(lower, "name") && strings.Contains(line, ":") {
-
-			// 1) Try previous line first:
 			if i > 0 {
-				candidate := strings.TrimSpace(lines[i-1])
-				candidate = cleanName(candidate)
+				candidate := cleanName(strings.TrimSpace(lines[i-1]))
 				if isCleanName(candidate) {
 					return candidate
 				}
 			}
-
-			// 2) Fallback: extract name after "Name:"
-			name := extractNameAfterLabel(line)
-			name = cleanName(name)
+			name := cleanName(extractNameAfterLabel(line))
 			if isCleanName(name) {
 				return name
 			}
 		}
 	}
+	return ""
+}
 
+func extractNameAfterLabel(line string) string {
+	re := regexp.MustCompile(`(?i)name\s*:\s*([A-Za-z ]+)`)
+	m := re.FindStringSubmatch(line)
+	if len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
 	return ""
 }
 
@@ -170,40 +178,27 @@ func cleanName(s string) string {
 	if s == "" {
 		return s
 	}
-	parts := strings.Fields(s)
 
-	stopWords := map[string]bool{
-		"opening": true,
-		"state":   true,
-		"branch":  true,
-		"bank":    true,
-		"acc":     true,
-		"account": true,
-		"salary":  true,
-		"amount":  true,
-		"credit":  true,
-		"no":      true,
+	stop := map[string]bool{
+		"opening": true, "state": true, "branch": true, "bank": true,
+		"acc": true, "account": true, "salary": true,
 	}
 
-	clean := []string{}
+	parts := strings.Fields(s)
+	out := []string{}
 	for _, p := range parts {
-		l := strings.ToLower(p)
-		if stopWords[l] {
-			break // stop reading further noise
+		if stop[strings.ToLower(p)] {
+			break
 		}
-		clean = append(clean, p)
-		if len(clean) == 2 { // cap at 2 words: First + Last
+		out = append(out, p)
+		if len(out) == 2 {
 			break
 		}
 	}
-
-	return strings.Join(clean, " ")
+	return strings.Join(out, " ")
 }
 
 func isCleanName(s string) bool {
-	if s == "" {
-		return false
-	}
 	parts := strings.Fields(s)
 	if len(parts) != 2 {
 		return false
@@ -216,45 +211,33 @@ func isCleanName(s string) bool {
 	return true
 }
 
-func extractNameAfterLabel(line string) string {
-	re := regexp.MustCompile(`(?i)name\s*:\s*([A-Za-z ]+)`)
-	matches := re.FindStringSubmatch(line)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
-	}
-	return ""
-}
+// Account Holder Name (unchanged)
 
-// extractAccountHolderName extracts account holder name from bank statement
 func extractAccountHolderName(text string) string {
-	// 1. Try label-based patterns first (your original logic)
 	patterns := []string{
-		`(?i)account\s*holder[\s:]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)customer\s*name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
-		`(?i)name[\s:]*([A-Z][a-zA-Z\s\.]+)`,
+		`(?i)account\s*holder[\s:]*([A-Z][A-Za-z\s\.]+)`,
+		`(?i)customer\s*name[\s:]*([A-Z][A-Za-z\s\.]+)`,
+		`(?i)name[\s:]*([A-Z][A-Za-z\s\.]+)`,
 	}
 
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
-			name := cleanName(matches[1])
-			if validName(name) {
-				return name
+	for _, p := range patterns {
+		re := regexp.MustCompile(p)
+		if m := re.FindStringSubmatch(text); len(m) > 1 {
+			n := cleanName(m[1])
+			if validName(n) {
+				return n
 			}
 		}
 	}
 
-	// 2. Fallback: Detect standalone prefix-based names (HDFC, SBI, ICICI)
-	prefixRegex := regexp.MustCompile(`(?m)(?i)\b(MR|MRS|MS|SHRI|SMT)\.?\s+[A-Z][A-Z\s]{2,50}`)
-	match := prefixRegex.FindString(text)
-	if match != "" {
-		// remove prefix and clean
-		parts := strings.Fields(match)
+	// MR AASHISH RAWAT
+	prefix := regexp.MustCompile(`(?m)(?i)\b(MR|MRS|MS|SHRI|SMT)\.?\s+[A-Z][A-Z\s]{2,50}`)
+	if m := prefix.FindString(text); m != "" {
+		parts := strings.Fields(m)
 		if len(parts) >= 2 {
-			name := strings.Join(parts[1:], " ")
-			name = cleanName(name)
-			if validName(name) {
-				return name
+			n := cleanName(strings.Join(parts[1:], " "))
+			if validName(n) {
+				return n
 			}
 		}
 	}
@@ -262,70 +245,148 @@ func extractAccountHolderName(text string) string {
 	return ""
 }
 
-// helpers
+func validName(n string) bool { return len(n) > 2 && len(n) < 50 }
 
-func validName(n string) bool {
-	return len(n) > 2 && len(n) < 50
+// =============================================
+// 🚀 NEW — FULL BANK STATEMENT PARSER
+// =============================================
+
+func ParseBankStatement(text string) dto.BankStatementData {
+	clean := normalizeLines(text)
+
+	return dto.BankStatementData{
+		AccountNumber:     extractAccountNumber(text),
+		AccountHolderName: extractAccountHolderName(text),
+		Transactions:      parseBankTransactions(clean),
+	}
 }
 
-// extractSalaryCredits extracts salary credit transactions from bank statement
-func extractSalaryCredits(text string) []dto.BankTransaction {
-	var credits []dto.BankTransaction
-
-	// Pattern for transaction lines with date, description, and amount
-	// Example: "15/01/2024 SALARY CREDIT 50000.00"
-	pattern := `(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s+([A-Z\s]+(?:SALARY|SAL|CREDIT)[\w\s]*)\s+([0-9,]+\.?\d*)`
-	re := regexp.MustCompile(pattern)
-
-	matches := re.FindAllStringSubmatch(text, -1)
-	for _, match := range matches {
-		if len(match) > 3 {
-			amountStr := strings.ReplaceAll(match[3], ",", "")
-			if amount, err := strconv.ParseFloat(amountStr, 64); err == nil {
-				date, _ := parseDate(match[1])
-				credits = append(credits, dto.BankTransaction{
-					Date:        date,
-					Amount:      amount,
-					Description: strings.TrimSpace(match[2]),
-					IsCredit:    true,
-				})
-			}
-		}
+// Main transaction dispatcher
+func parseBankTransactions(lines []string) []dto.BankTransaction {
+	tx := parseTabularTransactions(lines)
+	if len(tx) > 0 {
+		return tx
 	}
-
-	// Alternative pattern for credit entries
-	if len(credits) == 0 {
-		pattern2 := `(?i)(salary|sal)\s+(?:credit|cr)\s+([0-9,]+\.?\d*)`
-		re2 := regexp.MustCompile(pattern2)
-		matches2 := re2.FindAllStringSubmatch(text, -1)
-		for _, match := range matches2 {
-			if len(match) > 2 {
-				amountStr := strings.ReplaceAll(match[2], ",", "")
-				if amount, err := strconv.ParseFloat(amountStr, 64); err == nil {
-					credits = append(credits, dto.BankTransaction{
-						Amount:      amount,
-						Description: "Salary Credit",
-						IsCredit:    true,
-					})
-				}
-			}
-		}
-	}
-
-	return credits
+	return parseLooseTransactions(lines)
 }
 
-func parseDate(dateStr string) (time.Time, error) {
-	formats := []string{"02/01/2006", "02-01-2006", "2006-01-02"}
-	for _, format := range formats {
-		if t, err := time.Parse(format, dateStr); err == nil {
+// ----------------------
+// 1. TABULAR FORMAT PARSER
+// ----------------------
+func parseTabularTransactions(lines []string) []dto.BankTransaction {
+	dateRe := regexp.MustCompile(`^\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})`)
+	var tx []dto.BankTransaction
+
+	for _, line := range lines {
+		if !dateRe.MatchString(line) {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+
+		dateStr := parts[0]
+		amountStr := parts[len(parts)-1]
+		amount := mustParseAmount(amountStr)
+		if amount == 0 {
+			continue
+		}
+
+		desc := strings.Join(parts[1:len(parts)-1], " ")
+		date, _ := parseDateSmart(dateStr)
+
+		up := strings.ToUpper(desc + " " + amountStr)
+		isCredit := strings.Contains(up, "CR") ||
+			strings.Contains(up, "CREDIT") ||
+			strings.Contains(up, "NEFT") ||
+			strings.Contains(up, "UPI") ||
+			strings.Contains(up, "SALARY")
+
+		tx = append(tx, dto.BankTransaction{
+			Date:        date,
+			Amount:      amount,
+			Description: desc,
+			IsCredit:    isCredit,
+		})
+	}
+	return tx
+}
+
+// ----------------------
+// 2. LOOSE FORMAT PARSER
+// ----------------------
+
+func parseLooseTransactions(lines []string) []dto.BankTransaction {
+	dateRe := regexp.MustCompile(`\d{1,2}[/-]\d{1,2}[/-]\d{2,4}`)
+	amountRe := regexp.MustCompile(`[0-9,]+\.\d{2}`)
+
+	var tx []dto.BankTransaction
+
+	for _, line := range lines {
+		d := dateRe.FindString(line)
+		if d == "" {
+			continue
+		}
+		amounts := amountRe.FindAllString(line, -1)
+		if len(amounts) == 0 {
+			continue
+		}
+
+		amount := mustParseAmount(amounts[len(amounts)-1])
+		if amount == 0 {
+			continue
+		}
+
+		desc := strings.TrimSpace(strings.Replace(line, amounts[len(amounts)-1], "", 1))
+		date, _ := parseDateSmart(d)
+
+		up := strings.ToUpper(desc)
+		isCredit := strings.Contains(up, "CR") ||
+			strings.Contains(up, "CREDIT") ||
+			strings.Contains(up, "SAL") ||
+			strings.Contains(up, "NEFT")
+
+		tx = append(tx, dto.BankTransaction{
+			Date:        date,
+			Amount:      amount,
+			Description: desc,
+			IsCredit:    isCredit,
+		})
+	}
+	return tx
+}
+
+// ----------------------
+// DATE & AMOUNT HELPERS
+// ----------------------
+
+func parseDateSmart(s string) (time.Time, error) {
+	formats := []string{
+		"02/01/2006", "02/01/06",
+		"02-01-2006", "02-01-06",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
 			return t, nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("unknown date format")
+	return time.Time{}, fmt.Errorf("invalid date: %s", s)
 }
 
-// NormalizeString normalizes string for comparison (lowercase, remove spaces)
+func mustParseAmount(s string) float64 {
+	s = strings.ToUpper(strings.ReplaceAll(s, ",", ""))
+	s = strings.TrimSuffix(s, "CR")
+	s = strings.TrimSuffix(s, "DR")
+	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f
+}
+
+// =============================
+// NAME COMPARISON HELPERS
+// =============================
+
 func NormalizeString(s string) string {
 	s = strings.ToLower(s)
 	s = strings.ReplaceAll(s, " ", "")
@@ -333,78 +394,61 @@ func NormalizeString(s string) string {
 	return s
 }
 
-// CompareNames compares two names for matching
-func CompareNames(name1, name2 string) bool {
-	if name1 == "" || name2 == "" {
+func CompareNames(a, b string) bool {
+	if a == "" || b == "" {
 		return false
 	}
-
-	norm1 := NormalizeString(name1)
-	norm2 := NormalizeString(name2)
-
-	// Exact match
-	if norm1 == norm2 {
+	a2 := NormalizeString(a)
+	b2 := NormalizeString(b)
+	if a2 == b2 {
+		return true
+	}
+	if strings.Contains(a2, b2) || strings.Contains(b2, a2) {
 		return true
 	}
 
-	// Partial match (one contains the other)
-	if strings.Contains(norm1, norm2) || strings.Contains(norm2, norm1) {
-		return true
+	wa := strings.Fields(strings.ToLower(a))
+	wb := strings.Fields(strings.ToLower(b))
+	if len(wa) > len(wb) {
+		wa, wb = wb, wa
 	}
 
-	// Check if all words in shorter name appear in longer name
-	words1 := strings.Fields(strings.ToLower(name1))
-	words2 := strings.Fields(strings.ToLower(name2))
-
-	if len(words1) > len(words2) {
-		words1, words2 = words2, words1
-	}
-
-	matchCount := 0
-	for _, w1 := range words1 {
-		for _, w2 := range words2 {
-			if strings.Contains(w2, w1) || strings.Contains(w1, w2) {
-				matchCount++
+	match := 0
+	for _, x := range wa {
+		for _, y := range wb {
+			if strings.Contains(y, x) || strings.Contains(x, y) {
+				match++
 				break
 			}
 		}
 	}
 
-	// If at least 50% of words match
-	return float64(matchCount)/float64(len(words1)) >= 0.5
+	return float64(match)/float64(len(wa)) >= 0.5
 }
 
-// CalculateNameSimilarity calculates the similarity between two names using Levenshtein distance
-// Returns a score between 0.0 and 1.0
-func CalculateNameSimilarity(name1, name2 string) float64 {
-	s1 := NormalizeString(name1)
-	s2 := NormalizeString(name2)
+func CalculateNameSimilarity(a, b string) float64 {
+	a2 := NormalizeString(a)
+	b2 := NormalizeString(b)
 
-	if s1 == "" && s2 == "" {
+	if a2 == "" && b2 == "" {
 		return 1.0
 	}
-	if s1 == "" || s2 == "" {
+	if a2 == "" || b2 == "" {
 		return 0.0
 	}
 
-	dist := levenshteinDistance(s1, s2)
-	maxLen := len(s1)
-	if len(s2) > maxLen {
-		maxLen = len(s2)
+	dist := levenshteinDistance(a2, b2)
+	maxLen := len(a2)
+	if len(b2) > maxLen {
+		maxLen = len(b2)
 	}
-
-	if maxLen == 0 {
-		return 1.0
-	}
-
-	return 1.0 - float64(dist)/float64(maxLen)
+	return 1 - float64(dist)/float64(maxLen)
 }
 
-// levenshteinDistance calculates the Levenshtein distance between two strings
-func levenshteinDistance(s1, s2 string) int {
-	r1 := []rune(s1)
-	r2 := []rune(s2)
-	n, m := len(r1), len(r2)
+func levenshteinDistance(a, b string) int {
+	ra := []rune(a)
+	rb := []rune(b)
+	n, m := len(ra), len(rb)
 
 	if n == 0 {
 		return m
@@ -413,33 +457,33 @@ func levenshteinDistance(s1, s2 string) int {
 		return n
 	}
 
-	matrix := make([][]int, n+1)
-	for i := range matrix {
-		matrix[i] = make([]int, m+1)
+	mat := make([][]int, n+1)
+	for i := range mat {
+		mat[i] = make([]int, m+1)
 	}
 
 	for i := 0; i <= n; i++ {
-		matrix[i][0] = i
+		mat[i][0] = i
 	}
 	for j := 0; j <= m; j++ {
-		matrix[0][j] = j
+		mat[0][j] = j
 	}
 
 	for i := 1; i <= n; i++ {
 		for j := 1; j <= m; j++ {
 			cost := 0
-			if r1[i-1] != r2[j-1] {
+			if ra[i-1] != rb[j-1] {
 				cost = 1
 			}
-			matrix[i][j] = min(
-				matrix[i-1][j]+1,      // deletion
-				matrix[i][j-1]+1,      // insertion
-				matrix[i-1][j-1]+cost, // substitution
+			mat[i][j] = min(
+				mat[i-1][j]+1,
+				mat[i][j-1]+1,
+				mat[i-1][j-1]+cost,
 			)
 		}
 	}
 
-	return matrix[n][m]
+	return mat[n][m]
 }
 
 func min(a, b, c int) int {

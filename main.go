@@ -13,6 +13,7 @@ import (
 )
 
 func main() {
+
 	// Tesseract configuration
 	os.Setenv("TESSDATA_PREFIX", "/usr/share/tesseract-ocr/5/tessdata/")
 	log.Println("TESSDATA_PREFIX set to:", os.Getenv("TESSDATA_PREFIX"))
@@ -28,7 +29,7 @@ func main() {
 	pdfProcessor := service.NewPDFProcessor()
 
 	// ------------------------------------------
-	// ⭐ NEW: Initialize PaddleOCR Client here
+	// ⭐ Initialize PaddleOCR Client
 	// ------------------------------------------
 	paddleClient, err := client.NewPaddleClient()
 	if err != nil {
@@ -39,21 +40,30 @@ func main() {
 	}
 
 	// ------------------------------------------
-	// Create service with Paddle support
+	// Income Service
 	// ------------------------------------------
 	incomeService := service.NewIncomeService(
 		tesseractClient,
 		pdfProcessor,
-		paddleClient, // <-- IMPORTANT
+		paddleClient,
 	)
-
-	// Initialize handler
 	incomeHandler := handler.NewIncomeHandler(incomeService)
+
+	// ------------------------------------------
 	// Aadhaar Service
+	// ------------------------------------------
 	aadhaarService := service.NewAadhaarService(tesseractClient, pdfProcessor)
 	aadhaarHandler := handler.NewAadhaarHandler(aadhaarService)
 
+	// ------------------------------------------
+	// PAN OCR Service + Handler
+	// ------------------------------------------
+	panService := service.NewPANService(paddleClient)
+	panHandler := handler.NewPANHandler(panService)
+
+	// ------------------------------------------
 	// Gin Router
+	// ------------------------------------------
 	router := gin.Default()
 	router.MaxMultipartMemory = 32 << 20
 
@@ -66,18 +76,28 @@ func main() {
 
 	api := router.Group("/api/v1")
 	{
+		// Income
 		income := api.Group("/income")
 		{
 			income.POST("/verify", incomeHandler.VerifyIncome)
 		}
 
+		// ITR
 		itr := api.Group("/itr")
 		{
 			itr.POST("/analyze", incomeHandler.AnalyzeITR)
 		}
+
+		// Aadhaar
 		aadhaar := api.Group("/aadhaar")
 		{
 			aadhaar.POST("/extract", aadhaarHandler.ExtractAadhaar)
+		}
+
+		//  PAN OCR API
+		pan := api.Group("/pan")
+		{
+			pan.POST("/ocr", panHandler.ExtractPAN)
 		}
 	}
 

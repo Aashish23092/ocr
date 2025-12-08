@@ -61,6 +61,14 @@ func main() {
 	panService := service.NewPANService(paddleClient)
 	panHandler := handler.NewPANHandler(panService)
 
+	dlService := service.NewDrivingLicenseService(paddleClient, tesseractClient)
+	dlHandler := handler.NewDrivingLicenseHandler(dlService)
+
+	// ------------------------------------------
+	// Employee Verification OCR Service
+	// ------------------------------------------
+	employeeService := service.NewEmployeeService(paddleClient)
+	employeeHandler := handler.NewEmployeeHandler(employeeService)
 	// ------------------------------------------
 	// Gin Router
 	// ------------------------------------------
@@ -99,6 +107,17 @@ func main() {
 		{
 			pan.POST("/ocr", panHandler.ExtractPAN)
 		}
+		// Driving License OCR API
+		dl := api.Group("/driving-license")
+		{
+			dl.POST("/ocr", dlHandler.ExtractDL)
+		}
+		// Employee OCR API
+		employee := api.Group("/employee")
+		{
+			employee.POST("/verify", employeeHandler.VerifyEmployee)
+		}
+
 	}
 
 	log.Printf("Starting OCR Income Verification Service on port %s", cfg.ServerPort)

@@ -150,3 +150,22 @@ func (tc *TesseractClient) ExtractTextAndQuality(filePath string) (string, float
 func (tc *TesseractClient) Close() {
 	log.Println("Tesseract client closed")
 }
+
+// ExtractTextFromBytes extracts text directly from an image byte slice.
+func (tc *TesseractClient) ExtractTextFromBytes(data []byte) (string, error) {
+	// Create a temp file to store the image
+	tempFile, err := os.CreateTemp("", "tess-bytes-*.png")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	// Write bytes to file
+	if _, err := tempFile.Write(data); err != nil {
+		return "", fmt.Errorf("failed to write image bytes: %w", err)
+	}
+	tempFile.Close()
+
+	// Now reuse existing extractText()
+	return tc.extractText(tempFile.Name())
+}
